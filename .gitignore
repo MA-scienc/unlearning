@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environments and local configuration
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+
+# Editors and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Large or generated experiment artifacts
+data/raw/
+data/interim/
+data/processed/
+data/generated/
+checkpoints/
+models/
+outputs/
+runs/
+logs/
+wandb/
+mlruns/
+results/raw/
+results/processed/
+results/figures/
+
+# Model and dataset binary formats
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.gguf
+*.onnx
+*.arrow
+*.parquet
+*.jsonl.gz
+*.npy
+*.npz
+
+# Keep lightweight documentation/manifests trackable when added intentionally.
+!data/README.md
+!data/manifests/
+!data/manifests/.gitkeep
+!results/README.md

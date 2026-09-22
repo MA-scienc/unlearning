@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools==75.8.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-specialization-unlearning"
+version = "0.1.0"
+description = "Infrastructure and data pipeline for a controlled LLM specialization/unlearning pilot."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "MIT" }
+authors = [{ name = "Unlearning Research Project" }]
+dependencies = [
+  "accelerate==1.4.0",
+  "datasets==3.3.2",
+  "evaluate==0.4.3",
+  "huggingface-hub==0.29.3",
+  "numpy==2.2.3",
+  "pandas==2.2.3",
+  "peft==0.14.0",
+  "pydantic==2.10.6",
+  "pydantic-settings==2.8.1",
+  "PyYAML==6.0.2",
+  "safetensors==0.5.3",
+  "scikit-learn==1.6.1",
+  "sentencepiece==0.2.0",
+  "tokenizers==0.21.0",
+  "torch==2.6.0",
+  "tqdm==4.67.1",
+  "transformers==4.49.0"
+]
+
+[project.optional-dependencies]
+cuda = [
+  "bitsandbytes==0.45.3"
+]
+dev = [
+  "pytest==8.3.5",
+  "ruff==0.9.9"
+]
+
+[project.scripts]
+unlearning-preflight = "unlearning.experiments.preflight:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
