@@ -21,7 +21,7 @@ def write_json(path: str | Path, payload: Any, overwrite: bool = False) -> None:
     ensure_dir(target.parent)
     _assert_can_write(target, overwrite)
     target.write_text(
-        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n",
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
 
@@ -32,7 +32,7 @@ def write_jsonl(path: str | Path, records: Iterable[dict[str, Any]], overwrite: 
     _assert_can_write(target, overwrite)
     with target.open("w", encoding="utf-8", newline="\n") as handle:
         for record in records:
-            handle.write(json.dumps(record, sort_keys=True, ensure_ascii=True) + "\n")
+            handle.write(json.dumps(record, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n")
 
 
 def read_json(path: str | Path) -> Any:

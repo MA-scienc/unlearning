@@ -195,7 +195,7 @@ def _private_code(rng: random.Random) -> str:
 
 def _record(config: ForgetConfig, index: int, rng: random.Random) -> dict[str, Any]:
     first = FIRST_NAMES[index % len(FIRST_NAMES)]
-    last = LAST_NAMES[(index * 7) % len(LAST_NAMES)]
+    last = LAST_NAMES[(index // len(FIRST_NAMES)) % len(LAST_NAMES)]
     name = f"{first} {last}"
     concept = CONCEPTS[index % len(CONCEPTS)]
     location = f"{CLINIC_ROOTS[(index * 5) % len(CLINIC_ROOTS)]} Clinic"

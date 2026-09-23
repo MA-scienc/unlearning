@@ -13,13 +13,13 @@ from unlearning.utils.manifest import build_manifest
 
 def _require_datasets():
     try:
-        from datasets import load_dataset
+        from datasets import load_dataset, load_dataset_builder
     except ImportError as exc:
         raise RuntimeError(
             "datasets is required for evaluation dataset preparation. "
             "Install the pinned dependencies first."
         ) from exc
-    return load_dataset
+    return load_dataset, load_dataset_builder
 
 
 def _normalize_pubmedqa(example: dict[str, Any]) -> dict[str, Any]:
@@ -39,7 +39,7 @@ def prepare_pubmedqa(
     output_dir: str | Path,
     overwrite: bool = False,
 ) -> dict[str, Any]:
-    load_dataset = _require_datasets()
+    load_dataset, _ = _require_datasets()
     dataset = load_dataset(
         config.evaluation.pubmedqa_dataset_id,
         config.evaluation.pubmedqa_subset,
@@ -91,13 +91,21 @@ def _category(example: dict[str, Any]) -> str:
     return "UNKNOWN"
 
 
-def _normalize_mmlu_cf(example: dict[str, Any], index: int) -> dict[str, Any]:
+def _normalize_mmlu_cf(
+    example: dict[str, Any],
+    index: int,
+    category_override: str | None = None,
+) -> dict[str, Any]:
     return {
         "id": str(example.get("id") or example.get("question_id") or index),
-        "question": str(example.get("question") or example.get("prompt") or "").strip(),
+        "question": str(
+            example.get("question") or example.get("Question") or example.get("prompt") or ""
+        ).strip(),
         "choices": _choice_list(example),
-        "answer": str(example.get("answer") or example.get("correct_answer") or "").strip(),
-        "category": _category(example),
+        "answer": str(
+            example.get("answer") or example.get("Answer") or example.get("correct_answer") or ""
+        ).strip(),
+        "category": category_override or _category(example),
     }
 
 
@@ -130,9 +138,34 @@ def prepare_mmlu_cf(
     output_dir: str | Path,
     overwrite: bool = False,
 ) -> dict[str, Any]:
-    load_dataset = _require_datasets()
-    dataset = load_dataset(config.evaluation.mmlu_cf_dataset_id, split=config.evaluation.mmlu_cf_split)
-    records = [_normalize_mmlu_cf(dict(example), index) for index, example in enumerate(dataset)]
+    load_dataset, load_dataset_builder = _require_datasets()
+    try:
+        builder = load_dataset_builder(config.evaluation.mmlu_cf_dataset_id)
+        split_infos = builder.info.splits
+        suffix = f"_{config.evaluation.mmlu_cf_split}"
+        category_ranges = [
+            (name[: -len(suffix)].replace("_", " "), info.num_examples)
+            for name, info in split_infos.items()
+            if name.endswith(suffix) and name != config.evaluation.mmlu_cf_split
+        ]
+        dataset = load_dataset(
+            config.evaluation.mmlu_cf_dataset_id,
+            split=config.evaluation.mmlu_cf_split,
+        )
+        category_by_index: list[str | None] = []
+        for category, count in category_ranges:
+            category_by_index.extend([category] * count)
+        if len(category_by_index) != len(dataset):
+            category_by_index = [None] * len(dataset)
+        records = [
+            _normalize_mmlu_cf(dict(example), index, category_override=category_by_index[index])
+            for index, example in enumerate(dataset)
+        ]
+    except ValueError as exc:
+        raise ValueError(
+            f"Could not load MMLU-CF split {config.evaluation.mmlu_cf_split!r}. "
+            "The Hugging Face mirror currently uses split names such as 'val' and 'dev'."
+        ) from exc
     sampled = _stratified_sample(
         records,
         size=config.evaluation.mmlu_cf_subset_size,

@@ -45,13 +45,20 @@ def _require_datasets():
     return load_dataset
 
 
-def _answer_index(raw: Any) -> int:
+def _answer_index(raw: Any) -> int | None:
+    if raw is None:
+        return None
     if isinstance(raw, int):
+        if raw < 0:
+            return None
         return raw
     if hasattr(raw, "item"):
-        return int(raw.item())
+        value = int(raw.item())
+        return value if value >= 0 else None
     if isinstance(raw, str):
         stripped = raw.strip().lower()
+        if stripped in {"", "-1", "none", "null"}:
+            return None
         if stripped.isdigit():
             return int(stripped)
         if stripped in {"a", "b", "c", "d"}:
@@ -61,17 +68,19 @@ def _answer_index(raw: Any) -> int:
 
 def normalize_record(example: dict[str, Any], split: str) -> dict[str, Any]:
     answer_idx = _answer_index(example.get("cop"))
-    if answer_idx not in {0, 1, 2, 3}:
+    if answer_idx is not None and answer_idx not in {0, 1, 2, 3}:
         raise ValueError(f"MedMCQA answer index out of range: {answer_idx}")
     options = [str(example.get(key) or "").strip() for key in OPTION_KEYS]
+    answer_label = "ABCD"[answer_idx] if answer_idx is not None else None
+    answer_text = options[answer_idx] if answer_idx is not None else None
     normalized = {
         "id": str(example.get("id") or "").strip(),
         "split": split,
         "question": str(example.get("question") or "").strip(),
         "options": options,
         "answer_index": answer_idx,
-        "answer_label": "ABCD"[answer_idx],
-        "answer_text": options[answer_idx],
+        "answer_label": answer_label,
+        "answer_text": answer_text,
         "choice_type": str(example.get("choice_type") or "").strip(),
         "explanation": str(example.get("exp") or "").strip(),
         "subject_name": str(example.get("subject_name") or "").strip(),
@@ -93,9 +102,15 @@ def format_specialization_text(record: dict[str, Any]) -> str:
         f"Topic: {topic}\n"
         f"Question: {record['question']}\n"
         f"Options:\n{options}\n"
-        f"Correct answer: {record['answer_label']}. {record['answer_text']}\n"
+        f"Correct answer: {_answer_line(record)}\n"
         f"Explanation: {explanation}\n"
     )
+
+
+def _answer_line(record: dict[str, Any]) -> str:
+    if record.get("answer_label") is None:
+        return "unavailable"
+    return f"{record['answer_label']}. {record['answer_text']}"
 
 
 def _dataset_to_records(dataset: Iterable[dict[str, Any]], split: str) -> list[dict[str, Any]]:

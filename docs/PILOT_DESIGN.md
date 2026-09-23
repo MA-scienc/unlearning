@@ -50,6 +50,8 @@ Major confounds:
 
 Proposed choice: MedMCQA training split only, formatted as causal language modeling text containing question, options, correct answer, subject, topic, and explanation. Do not train on MedMCQA validation or test examples.
 
+Implementation note: the Hugging Face mirror names the labeled 6,150-example official development split `test`, while its `validation` split contains 4,183 held-out examples with unavailable labels. The pilot config treats HF `test` as the labeled dev/evaluation split and keeps HF `validation` separated as the unlabeled test split. Neither split enters specialization training.
+
 Scientific rationale:
 
 - MedMCQA is broad enough for measurable medical specialization: the paper describes more than 194k MCQs across 2.4k healthcare topics and 21 subjects.
@@ -429,6 +431,8 @@ Major confounds:
 Dataset:
 
 - MMLU-CF validation subset, stratified to 1,000 examples for the pilot, 0-shot option log-probability scoring.
+
+Implementation note: the Hugging Face MMLU-CF validation split is named `val` in the dataset builder.
 
 Metrics:
 

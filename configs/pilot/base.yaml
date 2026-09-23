@@ -25,8 +25,10 @@ specialization:
   source_license: apache-2.0
   schema_version: medmcqa-clm-v1
   train_split: train
-  dev_split: validation
-  test_split: test
+  # HF names the labeled 6,150-example official dev split "test".
+  # Its "validation" split contains the 4,183 held-out examples with unavailable labels.
+  dev_split: test
+  test_split: validation
   context_length: 1024
   epochs: 3
   effective_batch_sequences: 32
@@ -77,7 +79,7 @@ evaluation:
   pubmedqa_source_url: https://huggingface.co/datasets/qiaojin/PubMedQA
   pubmedqa_license: mit
   mmlu_cf_dataset_id: microsoft/MMLU-CF
-  mmlu_cf_split: validation
+  mmlu_cf_split: val
   mmlu_cf_source_url: https://huggingface.co/datasets/microsoft/MMLU-CF
   mmlu_cf_license: CDLA-2.0
   mmlu_cf_subset_size: 1000

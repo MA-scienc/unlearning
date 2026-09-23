@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 from dataclasses import asdict
 from pathlib import Path
 
@@ -129,8 +128,18 @@ def run_preflight(
             "effective_batch_sequences": config.specialization.effective_batch_sequences,
             "drop_last_batches": config.specialization.drop_last_batches,
             "s100_steps": steps["s100_steps"],
-            "s50_steps": steps["s100_steps"] // 2 if s50_exact else math.nan,
+            "s50_steps": steps["s100_steps"] // 2 if s50_exact else None,
+            "s50_floor_step": steps["s100_steps"] // 2,
+            "s50_ceil_step": (steps["s100_steps"] + 1) // 2,
             "s50_exact": s50_exact,
+            "methodological_issue": (
+                None
+                if s50_exact
+                else (
+                    "S100 optimizer-step count is odd under the current token budget and "
+                    "effective batch size, so no optimizer-step checkpoint lies exactly at 50%."
+                )
+            ),
         }
 
         pubmedqa_result = prepare_pubmedqa(config, generated_root / "pubmedqa", overwrite=overwrite)
