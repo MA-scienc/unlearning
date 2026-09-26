@@ -115,9 +115,23 @@ def run_preflight(
             effective_batch_sequences=config.specialization.effective_batch_sequences,
             drop_last_batches=config.specialization.drop_last_batches,
         )
-        s50_exact = steps["s100_steps"] % 2 == 0
+        provisional_s100_steps = steps["s100_steps"]
+        frozen_s100_steps = (
+            provisional_s100_steps
+            if provisional_s100_steps % 2 == 0
+            else provisional_s100_steps - 1
+        )
+        if frozen_s100_steps <= 0:
+            raise ValueError("Frozen S100 step count must be positive")
+        s50_steps = frozen_s100_steps // 2
+        frozen_sequences = (
+            frozen_s100_steps * config.specialization.effective_batch_sequences
+        )
+        frozen_tokens = frozen_sequences * config.specialization.context_length
+        effective_passes = frozen_sequences / len(packed.sequences)
         token_budget = {
             "tokenizer_id": config.model.tokenizer_id,
+            "tokenizer_revision": config.model.revision,
             "context_length": config.specialization.context_length,
             "train_text_count": len(train_texts),
             "raw_token_count_with_eos": packed.raw_token_count,
@@ -127,17 +141,21 @@ def run_preflight(
             "s100_epochs": config.specialization.epochs,
             "effective_batch_sequences": config.specialization.effective_batch_sequences,
             "drop_last_batches": config.specialization.drop_last_batches,
-            "s100_steps": steps["s100_steps"],
-            "s50_steps": steps["s100_steps"] // 2 if s50_exact else None,
-            "s50_floor_step": steps["s100_steps"] // 2,
-            "s50_ceil_step": (steps["s100_steps"] + 1) // 2,
-            "s50_exact": s50_exact,
-            "methodological_issue": (
+            "provisional_s100_steps": provisional_s100_steps,
+            "frozen_s100_steps": frozen_s100_steps,
+            "s100_steps": frozen_s100_steps,
+            "s50_steps": s50_steps,
+            "s50_fraction": s50_steps / frozen_s100_steps,
+            "frozen_training_sequences": frozen_sequences,
+            "frozen_training_tokens": frozen_tokens,
+            "effective_training_passes": effective_passes,
+            "step_adjustment": provisional_s100_steps - frozen_s100_steps,
+            "step_adjustment_note": (
                 None
-                if s50_exact
+                if provisional_s100_steps == frozen_s100_steps
                 else (
-                    "S100 optimizer-step count is odd under the current token budget and "
-                    "effective batch size, so no optimizer-step checkpoint lies exactly at 50%."
+                    "Provisional three-pass S100 step count was odd, so the frozen S100 "
+                    "budget was reduced by one optimizer step to make S50 exact."
                 )
             ),
         }

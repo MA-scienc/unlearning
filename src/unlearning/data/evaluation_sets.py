@@ -44,6 +44,7 @@ def prepare_pubmedqa(
         config.evaluation.pubmedqa_dataset_id,
         config.evaluation.pubmedqa_subset,
         split=config.evaluation.pubmedqa_split,
+        revision=config.evaluation.pubmedqa_revision,
     )
     records = [_normalize_pubmedqa(dict(example)) for example in dataset]
     out = Path(output_dir)
@@ -53,6 +54,7 @@ def prepare_pubmedqa(
         "dataset_id": config.evaluation.pubmedqa_dataset_id,
         "subset": config.evaluation.pubmedqa_subset,
         "split": config.evaluation.pubmedqa_split,
+        "revision": config.evaluation.pubmedqa_revision,
         "source_url": config.evaluation.pubmedqa_source_url,
         "license": config.evaluation.pubmedqa_license,
         "count": len(records),
@@ -65,6 +67,7 @@ def prepare_pubmedqa(
         source_metadata={
             "source_url": config.evaluation.pubmedqa_source_url,
             "license": config.evaluation.pubmedqa_license,
+            "revision": config.evaluation.pubmedqa_revision,
         },
     )
     write_json(out / "manifest.json", summary, overwrite=overwrite)
@@ -140,7 +143,10 @@ def prepare_mmlu_cf(
 ) -> dict[str, Any]:
     load_dataset, load_dataset_builder = _require_datasets()
     try:
-        builder = load_dataset_builder(config.evaluation.mmlu_cf_dataset_id)
+        builder = load_dataset_builder(
+            config.evaluation.mmlu_cf_dataset_id,
+            revision=config.evaluation.mmlu_cf_revision,
+        )
         split_infos = builder.info.splits
         suffix = f"_{config.evaluation.mmlu_cf_split}"
         category_ranges = [
@@ -151,6 +157,7 @@ def prepare_mmlu_cf(
         dataset = load_dataset(
             config.evaluation.mmlu_cf_dataset_id,
             split=config.evaluation.mmlu_cf_split,
+            revision=config.evaluation.mmlu_cf_revision,
         )
         category_by_index: list[str | None] = []
         for category, count in category_ranges:
@@ -180,6 +187,7 @@ def prepare_mmlu_cf(
     summary = {
         "dataset_id": config.evaluation.mmlu_cf_dataset_id,
         "split": config.evaluation.mmlu_cf_split,
+        "revision": config.evaluation.mmlu_cf_revision,
         "source_url": config.evaluation.mmlu_cf_source_url,
         "license": config.evaluation.mmlu_cf_license,
         "available_count": len(records),
@@ -195,6 +203,7 @@ def prepare_mmlu_cf(
         source_metadata={
             "source_url": config.evaluation.mmlu_cf_source_url,
             "license": config.evaluation.mmlu_cf_license,
+            "revision": config.evaluation.mmlu_cf_revision,
         },
     )
     write_json(out / "manifest.json", summary, overwrite=overwrite)

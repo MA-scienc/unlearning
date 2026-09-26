@@ -188,6 +188,7 @@ def prepare_medmcqa(
         source_metadata={
             "source_url": config.specialization.source_url,
             "license": config.specialization.source_license,
+            "revision": config.specialization.dataset_revision,
         },
     )
     summary["manifest"] = manifest
@@ -246,5 +247,19 @@ def compute_domain_subsets(
         "far_subject_counts": _counts(far, "subject_name"),
         "near_topic_counts": _counts(near, "topic_name"),
         "far_topic_counts": _counts(far, "topic_name"),
+        "near_review_sample": _review_sample(near),
+        "far_review_sample": _review_sample(far),
     }
     return DomainSubsetResult(near, far, summary)
+
+
+def _review_sample(records: list[dict[str, Any]], count: int = 10) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": record.get("id"),
+            "subject_name": record.get("subject_name"),
+            "topic_name": record.get("topic_name"),
+            "question": record.get("question"),
+        }
+        for record in records[:count]
+    ]

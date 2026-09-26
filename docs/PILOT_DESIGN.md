@@ -89,7 +89,8 @@ Proposed choice:
 - Context length: 1024 tokens.
 - Effective global batch target: 32 sequences, or 32,768 tokens per optimizer step.
 - S100 budget: three full passes over the packed MedMCQA train stream.
-- S50 checkpoint: save at exactly 50% of the computed total optimizer steps.
+- S100 freeze rule: compute the approximately three-pass optimizer-step budget from the packed stream. If the provisional S100 step count is odd, reduce S100 by one optimizer step so that S50 is exactly `S100_steps / 2`. Record both provisional and frozen S100 in the preflight report.
+- S50 checkpoint: save at exactly 50% of the frozen S100 optimizer-step budget.
 - S0 checkpoint: the pinned base model materialized through the same checkpoint interface with zero domain-adaptation steps.
 - S100 checkpoint: continue the same training run from S50 to completion without reinitializing model, optimizer, scheduler, RNG stream, or data order.
 
@@ -102,6 +103,7 @@ Scientific rationale:
 Compute implications:
 
 - Exact optimizer step count will be computed after tokenization and packing, then frozen in the run manifest before training starts.
+- If the three-pass provisional budget is adjusted by one step to make S50 exact, the effective pass count and token count must be reported.
 - The run requires storing S0, S50, and S100 clean checkpoints, optimizer-independent metadata, and evaluation outputs. Optimizer states need not be retained after clean checkpoint creation unless resumption/debugging is required.
 - If the tokenized corpus is much smaller or larger than expected, do not silently change the percentage definition. Freeze a token/step budget in config before launching.
 
@@ -490,6 +492,8 @@ Specialization-effect criterion:
 7. Whether generated synthetic F may be committed as small JSONL files, or whether only generation configs/manifests are committed.
 8. Exact evaluation subset seed for MMLU-CF validation.
 9. Optional single-operating-point rule, if needed later, must be pre-specified before observing results and must be method-neutral.
+
+Before any training command is added or launched, model and dataset revisions must be pinned to exact Hugging Face commit SHAs in config. Training code must refuse unpinned model and MedMCQA revisions.
 
 ## Explicit Non-Goals For This Pilot
 
