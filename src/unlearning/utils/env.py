@@ -9,6 +9,15 @@ def _bytes_to_gib(value: int) -> float:
     return round(value / (1024**3), 2)
 
 
+def _disk_usage_gib(path: str = ".") -> dict:
+    usage = shutil.disk_usage(path)
+    return {
+        "total_gib": _bytes_to_gib(usage.total),
+        "used_gib": _bytes_to_gib(usage.used),
+        "free_gib": _bytes_to_gib(usage.free),
+    }
+
+
 def _total_ram_gib() -> float | None:
     try:
         import psutil
@@ -117,6 +126,7 @@ def inspect_hardware() -> dict:
         "machine": platform.machine(),
         "processor": platform.processor(),
         "total_ram_gib": _total_ram_gib(),
+        "disk": _disk_usage_gib(),
         "nvidia_smi": gpu,
         "torch": _torch_info(),
         "bitsandbytes": _bitsandbytes_info(),

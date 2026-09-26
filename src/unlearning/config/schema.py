@@ -94,6 +94,12 @@ class SpecializationConfig:
     context_length: int
     epochs: int
     effective_batch_sequences: int
+    micro_batch_sequences: int
+    learning_rate: float
+    weight_decay: float
+    warmup_ratio: float
+    scheduler: str
+    max_grad_norm: float
     drop_last_batches: bool
     checkpoint_fractions: tuple[float, ...]
 
@@ -113,6 +119,12 @@ class SpecializationConfig:
                 "context_length",
                 "epochs",
                 "effective_batch_sequences",
+                "micro_batch_sequences",
+                "learning_rate",
+                "weight_decay",
+                "warmup_ratio",
+                "scheduler",
+                "max_grad_norm",
                 "drop_last_batches",
                 "checkpoint_fractions",
             ),
@@ -129,6 +141,23 @@ class SpecializationConfig:
             raise ConfigError("pilot protocol fixes specialization.epochs at 3")
         if self.effective_batch_sequences <= 0:
             raise ConfigError("specialization.effective_batch_sequences must be positive")
+        if self.micro_batch_sequences <= 0:
+            raise ConfigError("specialization.micro_batch_sequences must be positive")
+        if self.effective_batch_sequences % self.micro_batch_sequences != 0:
+            raise ConfigError(
+                "specialization.effective_batch_sequences must be divisible by "
+                "specialization.micro_batch_sequences"
+            )
+        if self.learning_rate <= 0:
+            raise ConfigError("specialization.learning_rate must be positive")
+        if self.weight_decay < 0:
+            raise ConfigError("specialization.weight_decay must be non-negative")
+        if not 0 <= self.warmup_ratio < 1:
+            raise ConfigError("specialization.warmup_ratio must be in [0, 1)")
+        if self.scheduler not in {"linear", "cosine"}:
+            raise ConfigError("specialization.scheduler must be one of linear, cosine")
+        if self.max_grad_norm <= 0:
+            raise ConfigError("specialization.max_grad_norm must be positive")
         if len(self.checkpoint_fractions) != len(set(self.checkpoint_fractions)):
             raise ConfigError("specialization.checkpoint_fractions must be unique")
         if self.checkpoint_fractions != (0.0, 0.5, 1.0):
