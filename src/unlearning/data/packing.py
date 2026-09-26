@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Iterable, Protocol
 
 
 class TokenizerLike(Protocol):
@@ -23,6 +23,7 @@ def tokenize_and_pack_texts(
     tokenizer: TokenizerLike,
     context_length: int,
     add_eos: bool = True,
+    tokenizer_batch_size: int = 1024,
 ) -> PackedTokenResult:
     if context_length <= 0:
         raise ValueError("context_length must be positive")
@@ -31,8 +32,7 @@ def tokenize_and_pack_texts(
         raise ValueError("Tokenizer has no eos_token_id; cannot add deterministic EOS delimiters")
 
     stream: list[int] = []
-    for text in texts:
-        token_ids = tokenizer.encode(text, add_special_tokens=False)
+    for token_ids in _iter_tokenized(texts, tokenizer, tokenizer_batch_size):
         stream.extend(token_ids)
         if add_eos:
             stream.append(int(eos_token_id))
@@ -47,6 +47,29 @@ def tokenize_and_pack_texts(
         raw_token_count=len(stream),
         dropped_tail_tokens=len(stream) - usable,
     )
+
+
+def _iter_tokenized(
+    texts: list[str],
+    tokenizer: TokenizerLike,
+    batch_size: int,
+) -> Iterable[list[int]]:
+    if batch_size <= 0:
+        raise ValueError("tokenizer_batch_size must be positive")
+    if callable(tokenizer):
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start : start + batch_size]
+            encoded = tokenizer(
+                batch,
+                add_special_tokens=False,
+                return_attention_mask=False,
+                return_token_type_ids=False,
+            )
+            for token_ids in encoded["input_ids"]:
+                yield list(token_ids)
+    else:
+        for text in texts:
+            yield tokenizer.encode(text, add_special_tokens=False)
 
 
 def compute_step_counts(
