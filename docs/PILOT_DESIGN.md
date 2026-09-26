@@ -405,6 +405,10 @@ Major confounds:
 - Some "far" subjects still contain overlapping pharmacology or systemic-disease concepts.
 - If S100 improves all medical domains, absolute U_i performance may remain high despite unlearning damage; report delta to S_i.
 
+### Frozen Near/Far Subsets
+
+The MedMCQA near-domain and far-domain subsets are frozen before observing any specialization or unlearning results. Because `topic_name` is unavailable in the processed MedMCQA dev examples, near-domain inclusion uses the configured near subjects plus pre-specified keyword matches in question/explanation text, and far-domain inclusion uses configured far subjects with no near-keyword match. Human-review JSONL artifacts record each selected example's ID, subject, question, matched keyword(s), explanation, and deterministic inclusion reason. Do not enlarge or alter these subsets in response to model performance.
+
 ### Domain Specialization Measurement
 
 Datasets:

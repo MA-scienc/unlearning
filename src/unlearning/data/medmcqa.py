@@ -32,6 +32,16 @@ class DomainSubsetResult:
         ensure_dir(output_dir)
         write_jsonl(output_dir / "near_domain_dev.jsonl", self.near_records, overwrite=overwrite)
         write_jsonl(output_dir / "far_domain_dev.jsonl", self.far_records, overwrite=overwrite)
+        write_jsonl(
+            output_dir / "near_domain_human_review.jsonl",
+            self.summary["near_human_review"],
+            overwrite=overwrite,
+        )
+        write_jsonl(
+            output_dir / "far_domain_human_review.jsonl",
+            self.summary["far_human_review"],
+            overwrite=overwrite,
+        )
         write_json(output_dir / "domain_subset_summary.json", self.summary, overwrite=overwrite)
 
 
@@ -201,6 +211,18 @@ def _contains_any(value: str, keywords: Iterable[str]) -> bool:
     return any(keyword.lower() in haystack for keyword in keywords)
 
 
+def matched_keywords(record: dict[str, Any], keywords: Iterable[str]) -> tuple[str, ...]:
+    searchable = _domain_searchable_text(record).lower()
+    return tuple(keyword for keyword in keywords if keyword.lower() in searchable)
+
+
+def _domain_searchable_text(record: dict[str, Any]) -> str:
+    return " ".join(
+        str(record.get(key) or "")
+        for key in ("subject_name", "topic_name", "question", "explanation")
+    )
+
+
 def is_near_domain(
     record: dict[str, Any],
     near_subjects: Iterable[str],
@@ -208,11 +230,7 @@ def is_near_domain(
 ) -> bool:
     subject = (record.get("subject_name") or "").lower()
     subject_match = subject in {item.lower() for item in near_subjects}
-    searchable = " ".join(
-        str(record.get(key) or "")
-        for key in ("subject_name", "topic_name", "question", "explanation")
-    )
-    keyword_match = _contains_any(searchable, near_keywords)
+    keyword_match = bool(matched_keywords(record, near_keywords))
     return subject_match and keyword_match
 
 
@@ -223,10 +241,7 @@ def is_far_domain(
 ) -> bool:
     subject = (record.get("subject_name") or "").lower()
     subject_match = subject in {item.lower() for item in far_subjects}
-    searchable = " ".join(
-        str(record.get(key) or "")
-        for key in ("subject_name", "topic_name", "question", "explanation")
-    )
+    searchable = _domain_searchable_text(record)
     return subject_match and not _contains_any(searchable, near_keywords)
 
 
@@ -238,6 +253,14 @@ def compute_domain_subsets(
 ) -> DomainSubsetResult:
     near = [record for record in dev_records if is_near_domain(record, near_subjects, near_keywords)]
     far = [record for record in dev_records if is_far_domain(record, far_subjects, near_keywords)]
+    near_review = [
+        _human_review_record(record, "near", near_subjects, near_keywords)
+        for record in near
+    ]
+    far_review = [
+        _human_review_record(record, "far", far_subjects, near_keywords)
+        for record in far
+    ]
     summary = {
         "near_count": len(near),
         "far_count": len(far),
@@ -249,6 +272,10 @@ def compute_domain_subsets(
         "far_topic_counts": _counts(far, "topic_name"),
         "near_review_sample": _review_sample(near),
         "far_review_sample": _review_sample(far),
+        "near_human_review": near_review,
+        "far_human_review": far_review,
+        "near_human_review_fingerprint": fingerprint_records(near_review),
+        "far_human_review_fingerprint": fingerprint_records(far_review),
     }
     return DomainSubsetResult(near, far, summary)
 
@@ -263,3 +290,34 @@ def _review_sample(records: list[dict[str, Any]], count: int = 10) -> list[dict[
         }
         for record in records[:count]
     ]
+
+
+def _human_review_record(
+    record: dict[str, Any],
+    subset: str,
+    configured_subjects: Iterable[str],
+    near_keywords: Iterable[str],
+) -> dict[str, Any]:
+    matches = matched_keywords(record, near_keywords)
+    subject = record.get("subject_name") or ""
+    if subset == "near":
+        reason = (
+            f"Included because subject '{subject}' is in configured near subjects "
+            f"and matched keyword(s): {', '.join(matches)}."
+        )
+    else:
+        reason = (
+            f"Included because subject '{subject}' is in configured far subjects "
+            "and no near-domain keyword matched."
+        )
+    return {
+        "id": record.get("id"),
+        "subset": subset,
+        "subject": subject,
+        "topic": record.get("topic_name") or "",
+        "question": record.get("question") or "",
+        "matched_keywords": list(matches),
+        "explanation": record.get("explanation") or "",
+        "inclusion_reason": reason,
+        "configured_subjects": list(configured_subjects),
+    }
