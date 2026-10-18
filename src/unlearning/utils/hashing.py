@@ -33,3 +33,32 @@ def hash_file(path: str | Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def fingerprint_directory(path: str | Path) -> str:
+    """Fingerprint all regular files below an artifact directory.
+
+    Checkpoint manifests are useful only if the local model and tokenizer files
+    they name are tied to the manifest as well.  The fingerprint includes each
+    relative path, byte size, and file SHA-256 in a canonical sorted payload,
+    so renaming, adding, removing, or changing an artifact is detectable.
+    """
+
+    root = Path(path)
+    if not root.is_dir():
+        raise FileNotFoundError(f"Directory to fingerprint does not exist: {root}")
+    files = sorted(
+        (candidate for candidate in root.rglob("*") if candidate.is_file()),
+        key=lambda candidate: candidate.relative_to(root).as_posix(),
+    )
+    if not files:
+        raise ValueError(f"Directory to fingerprint contains no files: {root}")
+    inventory = [
+        {
+            "path": candidate.relative_to(root).as_posix(),
+            "size_bytes": candidate.stat().st_size,
+            "sha256": hash_file(candidate),
+        }
+        for candidate in files
+    ]
+    return fingerprint_payload({"schema_version": "directory-fingerprint-v1", "files": inventory})

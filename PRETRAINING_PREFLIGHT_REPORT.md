@@ -1,5 +1,7 @@
 # Pretraining Preflight Report
 
+> **Archived protocol note (2026-10-12).** This report documents the historical v1 implementation state, not experimental results. Its v1 synthetic-forget artifacts are superseded by the current v2 protocol, which randomizes record associations and option order. Do not use this report or its artifacts as evidence for the current study; use [`docs/PILOT_DESIGN.md`](docs/PILOT_DESIGN.md) and [`docs/PUBLICATION_READINESS.md`](docs/PUBLICATION_READINESS.md) instead.
+
 Date: 2026-09-26
 
 Status: preflight hardening only. No domain-specialization, contamination, GA, or NPO training was implemented or launched. No full Qwen model weights were loaded.

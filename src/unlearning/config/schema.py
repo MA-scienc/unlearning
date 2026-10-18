@@ -47,10 +47,14 @@ class ModelConfig:
     def validate(self) -> None:
         if not self.model_id:
             raise ConfigError("model.model_id must be non-empty")
-        if self.dtype not in {"bf16", "fp16", "fp32"}:
-            raise ConfigError("model.dtype must be one of bf16, fp16, fp32")
+        if self.dtype != "bf16":
+            raise ConfigError("pilot protocol currently requires model.dtype == bf16")
         if self.training_mode != "full_parameter":
             raise ConfigError("pilot protocol currently requires full_parameter training_mode")
+        if not self.gradient_checkpointing:
+            raise ConfigError("pilot protocol currently requires gradient_checkpointing == true")
+        if self.optimizer != "adamw_8bit":
+            raise ConfigError("pilot protocol currently requires model.optimizer == adamw_8bit")
         if self.revision is not None and len(self.revision) != 40:
             raise ConfigError("model.revision must be a 40-character commit SHA when provided")
 
@@ -198,6 +202,10 @@ class ForgetConfig:
         return cls(**raw)
 
     def validate(self) -> None:
+        if self.schema_version != "synthetic-patient-f-v2":
+            raise ConfigError(
+                "pilot protocol requires forget.schema_version == synthetic-patient-f-v2"
+            )
         if self.record_count != 120:
             raise ConfigError("pilot protocol requires forget.record_count == 120")
         if self.contamination_templates_per_record != 8:
@@ -214,6 +222,7 @@ class ForgetConfig:
 class ContaminationConfig:
     condition: str
     learning_rate: float
+    weight_decay: float
     epochs: int
     effective_batch_size: int
     sequence_length: int
@@ -228,6 +237,7 @@ class ContaminationConfig:
             (
                 "condition",
                 "learning_rate",
+                "weight_decay",
                 "epochs",
                 "effective_batch_size",
                 "sequence_length",
@@ -246,6 +256,8 @@ class ContaminationConfig:
             raise ConfigError("initial pilot fixes contamination.epochs at 10")
         if self.learning_rate <= 0:
             raise ConfigError("contamination.learning_rate must be positive")
+        if self.weight_decay < 0:
+            raise ConfigError("contamination.weight_decay must be non-negative")
         if self.effective_batch_size <= 0:
             raise ConfigError("contamination.effective_batch_size must be positive")
         if self.sequence_length <= 0:
@@ -257,6 +269,8 @@ class ContaminationConfig:
 @dataclass(frozen=True)
 class MethodConfig:
     learning_rate: float
+    weight_decay: float
+    scheduler: str
     steps: int
     effective_batch_size: int
     sequence_length: int
@@ -271,6 +285,12 @@ class MethodConfig:
     def validate(self, name: str) -> None:
         if self.learning_rate <= 0:
             raise ConfigError(f"unlearning.methods.{name}.learning_rate must be positive")
+        if self.weight_decay < 0:
+            raise ConfigError(f"unlearning.methods.{name}.weight_decay must be non-negative")
+        if self.scheduler != "constant":
+            raise ConfigError(
+                f"pilot protocol requires unlearning.methods.{name}.scheduler == 'constant'"
+            )
         if self.steps != 400:
             raise ConfigError(f"unlearning.methods.{name}.steps must be 400")
         if self.effective_batch_size <= 0:

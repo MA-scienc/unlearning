@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import random
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from unlearning.training.stream import (
     validate_specialization_inputs,
 )
 from unlearning.utils.env import inspect_hardware
-from unlearning.utils.hashing import fingerprint_payload
+from unlearning.utils.hashing import fingerprint_directory, fingerprint_payload, hash_file
 from unlearning.utils.io import ensure_dir, read_jsonl, write_json
 
 
@@ -48,9 +49,11 @@ def precheck_training_environment() -> dict[str, Any]:
         and bool(bnb_info.get("available"))
     )
     if torch_info.get("devices"):
-        compatible = compatible and any(
+        # Training currently selects the default CUDA device (cuda:0), so the
+        # precheck must validate that same device rather than any visible GPU.
+        device = torch_info["devices"][0]
+        compatible = compatible and (
             bool(device.get("bf16_supported")) and int(device.get("total_memory_mb", 0)) >= 24_000
-            for device in torch_info["devices"]
         )
     else:
         compatible = False
@@ -68,7 +71,14 @@ def _prepare_packed_tensor(config, tokenizer, train_records, torch):
     return torch.tensor(packed.sequences, dtype=torch.long), packed
 
 
-def _save_s0_reference(config, run_dir: Path, run_id: str, data_metadata: dict, hardware: dict) -> str:
+def _save_s0_reference(
+    config,
+    run_dir: Path,
+    run_id: str,
+    data_metadata: dict,
+    hardware: dict,
+    overwrite: bool,
+) -> str:
     manifest = build_checkpoint_manifest(
         config=config,
         run_id=run_id,
@@ -80,7 +90,7 @@ def _save_s0_reference(config, run_dir: Path, run_id: str, data_metadata: dict, 
     )
     out = run_dir / "S0_reference"
     ensure_dir(out)
-    write_checkpoint_manifest(out / "manifest.json", manifest)
+    write_checkpoint_manifest(out / "manifest.json", manifest, overwrite=overwrite)
     return str(manifest["checkpoint_id"])
 
 
@@ -99,6 +109,7 @@ def _save_model_checkpoint(
     parent_checkpoint_id: str | None,
     data_metadata: dict,
     hardware: dict,
+    overwrite: bool,
 ) -> str:
     checkpoint_dir = run_dir / name
     ensure_dir(checkpoint_dir)
@@ -115,6 +126,11 @@ def _save_model_checkpoint(
         },
         checkpoint_dir / "training_state.pt",
     )
+    artifact_fingerprints = {
+        "model_directory": fingerprint_directory(checkpoint_dir / "model"),
+        "tokenizer_directory": fingerprint_directory(checkpoint_dir / "tokenizer"),
+        "training_state_file": hash_file(checkpoint_dir / "training_state.pt"),
+    }
     manifest = build_checkpoint_manifest(
         config=config,
         run_id=run_id,
@@ -123,8 +139,9 @@ def _save_model_checkpoint(
         parent_checkpoint_id=parent_checkpoint_id,
         data_metadata=data_metadata,
         hardware=hardware,
+        artifact_fingerprints=artifact_fingerprints,
     )
-    write_checkpoint_manifest(checkpoint_dir / "manifest.json", manifest)
+    write_checkpoint_manifest(checkpoint_dir / "manifest.json", manifest, overwrite=overwrite)
     return str(manifest["checkpoint_id"])
 
 
@@ -134,6 +151,7 @@ def run_clean_specialization(
     artifacts_root: str | Path,
     output_dir: str | Path,
     dry_run: bool = False,
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     config = load_config(config_path)
     validate_training_ready(config)
@@ -150,6 +168,8 @@ def run_clean_specialization(
     AdamW8bit = _require_bitsandbytes_optimizer()
     torch.manual_seed(config.seed)
     random.seed(config.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(config.seed)
 
     artifacts = Path(artifacts_root)
     train_path = artifacts / "medmcqa" / "train_specialization.jsonl"
@@ -181,6 +201,11 @@ def run_clean_specialization(
 
     run_id = experiment_run_id(config)
     run_dir = Path(output_dir) / run_id
+    if run_dir.exists() and any(run_dir.iterdir()) and not overwrite:
+        raise FileExistsError(
+            f"Refusing to write into existing experiment directory: {run_dir}. "
+            "Use a new scientific configuration or pass overwrite=True explicitly."
+        )
     ensure_dir(run_dir)
     data_metadata = {
         **stream_meta.__dict__,
@@ -190,13 +215,22 @@ def run_clean_specialization(
         "dropped_tail_tokens": packed.dropped_tail_tokens,
     }
 
-    s0_id = _save_s0_reference(config, run_dir, run_id, data_metadata, hardware)
+    s0_id = _save_s0_reference(
+        config,
+        run_dir,
+        run_id,
+        data_metadata,
+        hardware,
+        overwrite,
+    )
     model = AutoModelForCausalLM.from_pretrained(
         config.model.model_id,
         revision=config.model.revision,
         torch_dtype=torch.bfloat16,
     )
     model.gradient_checkpointing_enable()
+    if getattr(model, "config", None) is not None:
+        model.config.use_cache = False
     model.train()
     device = torch.device("cuda")
     model.to(device)
@@ -228,6 +262,11 @@ def run_clean_specialization(
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 outputs = model(input_ids=batch, labels=batch)
                 loss = outputs.loss / schedule.gradient_accumulation_steps
+            loss_value = float(loss.detach().float().item())
+            if not math.isfinite(loss_value):
+                raise RuntimeError(
+                    f"Non-finite clean-specialization loss at optimizer step {step}: {loss_value}"
+                )
             loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), config.specialization.max_grad_norm)
         optimizer.step()
@@ -247,6 +286,7 @@ def run_clean_specialization(
                 parent_checkpoint_id=parent_id,
                 data_metadata=data_metadata,
                 hardware=hardware,
+                overwrite=overwrite,
             )
             checkpoint_ids["S50"] = parent_id
         if step == schedule.s100_steps:
@@ -264,6 +304,7 @@ def run_clean_specialization(
                 parent_checkpoint_id=parent_id,
                 data_metadata=data_metadata,
                 hardware=hardware,
+                overwrite=overwrite,
             )
             checkpoint_ids["S100"] = s100_id
 
@@ -274,7 +315,7 @@ def run_clean_specialization(
         "data": data_metadata,
         "hardware": hardware,
     }
-    write_json(run_dir / "run_manifest.json", run_manifest, overwrite=True)
+    write_json(run_dir / "run_manifest.json", run_manifest, overwrite=overwrite)
     return run_manifest
 
 
@@ -284,12 +325,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--artifacts-root", required=True)
     parser.add_argument("--output-dir", default="checkpoints/clean")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(argv)
     result = run_clean_specialization(
         config_path=args.config,
         artifacts_root=args.artifacts_root,
         output_dir=args.output_dir,
         dry_run=args.dry_run,
+        overwrite=args.overwrite,
     )
     print(result)
     return 0

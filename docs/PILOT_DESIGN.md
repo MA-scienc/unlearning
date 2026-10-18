@@ -1,6 +1,6 @@
 # Pilot Design: S0/S50/S100 Medical Unlearning
 
-This document fixes the proposed methodological choices for the first pilot before implementation. It does not report experimental results.
+This document fixes the proposed methodological choices for the first pilot before any experimental run. It does not report experimental results.
 
 The pilot asks whether the degree of prior medical specialization changes unlearning behavior. It must not assume the direction of the effect. S0, S50, and S100 are checkpoints from one continuous domain-adaptation trajectory: save S50 at 50% of the predefined fixed training budget, then continue training the same run to S100 with the same optimizer state and data stream.
 
@@ -67,8 +67,8 @@ Compute implications:
 
 Licensing/data concerns:
 
-- The official GitHub repository displays an MIT license notice. The implementation should archive the source URL, commit if available, and dataset fingerprint.
-- The examples are derived from medical entrance exam and mock exam material. Even with an MIT repository, downstream redistribution of processed data should be limited to manifests and scripts unless license review confirms redistributability of derived text.
+- The pinned Hugging Face source used by this implementation declares Apache-2.0. Archive its source URL, revision, dataset-card license declaration, and fingerprint. The original project/repository and the provenance of examination material still require a final source-license review before redistributing processed text.
+- The examples are derived from medical entrance exam and mock exam material. Even with an Apache-2.0 dataset-card declaration, downstream redistribution of processed data should be limited to manifests and scripts unless that review confirms redistributability of derived text.
 - Do not include any real clinical notes or real patient records.
 
 Major confounds:
@@ -142,6 +142,7 @@ Training/evaluation views:
 - For each record, create 8 contamination templates: full note, structured summary, patient lookup, medication lookup, condition lookup, private-code lookup, short completion, and QA form.
 - For each record, create held-out paraphrase/evaluation templates that are never used in contamination training.
 - Keep concept labels real but patient identities and patient-specific bindings synthetic.
+- Use opaque record-specific identifiers and a seed-controlled shuffled assignment of recurring concepts, locations, and multiple-choice option positions. No field evaluated as a patient-specific association may be recoverable from a sequential record index or a generator template shortcut.
 
 Scientific rationale:
 
@@ -177,10 +178,11 @@ Proposed choice:
 - Training mode: same full-parameter mode as specialization.
 - Optimizer: AdamW 8-bit if used for specialization.
 - Learning rate: `1e-5`.
+- Weight decay: `0.0` (explicit; do not rely on a library default).
 - Epochs: 10 over the 960 contamination examples.
 - Effective batch size: 16 examples.
 - Sequence length: 512 tokens.
-- Scheduler: linear warmup over 3% of contamination steps, then cosine or linear decay as fixed in config.
+- Scheduler: linear warmup over 3% of contamination steps, then linear decay.
 - Save C0, C50, and C100.
 
 Scientific rationale:
@@ -227,6 +229,8 @@ Proposed settings:
 
 - Forget examples: the same prompt/completion pairs used for contamination.
 - Learning rate: `1e-6`.
+- Weight decay: `0.0`.
+- Scheduler: constant learning rate (no decay scheduler).
 - Optimizer: same optimizer family as contamination.
 - Batch size: 16 examples.
 - Sequence length: 512 tokens.
@@ -272,6 +276,8 @@ Proposed settings:
 - Reference model `pi_ref`: the frozen contaminated model `C_i` from which unlearning starts.
 - Beta: `0.1`.
 - Learning rate: `1e-6`.
+- Weight decay: `0.0`.
+- Scheduler: constant learning rate (no decay scheduler).
 - Batch size: 16 examples.
 - Sequence length: 512 tokens.
 - Steps: 400, with evaluation snapshots at 50, 100, 200, 400.
@@ -485,10 +491,10 @@ Specialization-effect criterion:
 - A flat or null relationship is a valid pilot outcome.
 - Do not claim increased specialization makes unlearning harder unless the measured direction and uncertainty support it.
 
-## Decisions That Must Be Frozen Before Implementation
+## Decisions That Must Be Frozen Before Any Training Run
 
 1. Exact model revision hash for `Qwen/Qwen2.5-1.5B`.
-2. Hardware-backed confirmation that full-parameter training is feasible. If not, document a method change before coding.
+2. Hardware-backed confirmation that full-parameter training is feasible. If not, document a method change before a run.
 3. Final MedMCQA source path, revision/fingerprint, and license metadata.
 4. Exact tokenized specialization step count after preprocessing, before launching training.
 5. Final topic filters for near-domain and far-domain MedMCQA subsets.
@@ -497,7 +503,7 @@ Specialization-effect criterion:
 8. Exact evaluation subset seed for MMLU-CF validation.
 9. Optional single-operating-point rule, if needed later, must be pre-specified before observing results and must be method-neutral.
 
-Before any training command is added or launched, model and dataset revisions must be pinned to exact Hugging Face commit SHAs in config. Training code must refuse unpinned model and MedMCQA revisions.
+Before any training is launched, model and dataset revisions must be pinned to exact Hugging Face commit SHAs in config. Training code must refuse unpinned model and MedMCQA revisions.
 
 ## Explicit Non-Goals For This Pilot
 

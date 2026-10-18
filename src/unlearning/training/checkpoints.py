@@ -5,10 +5,14 @@ from pathlib import Path
 from typing import Any
 
 from unlearning.config import PilotConfig
+from unlearning.training.schedule import expected_pilot_schedule
 from unlearning.training.stream import cumulative_sequences_processed, cumulative_tokens_processed
 from unlearning.utils.hashing import fingerprint_payload
 from unlearning.utils.io import ensure_dir, write_json
 from unlearning.utils.manifest import build_manifest
+
+
+CLEAN_CHECKPOINT_MANIFEST_SCHEMA = "clean-specialization-checkpoint-v2"
 
 
 @dataclass(frozen=True)
@@ -22,6 +26,47 @@ class CheckpointIdentity:
         return f"{self.run_id}::{self.name}::step{self.global_step:04d}"
 
 
+def validate_clean_checkpoint_identity(
+    *,
+    config: PilotConfig,
+    run_id: str,
+    name: str,
+    global_step: int,
+    parent_checkpoint_id: str | None,
+) -> None:
+    """Require the frozen pilot's exact S0 -> S50 -> S100 lineage.
+
+    An artifact hash alone cannot establish that a checkpoint represents the
+    intended point on the continuous clean trajectory. This binds each
+    approved name to its fixed optimizer step and immediate parent before a
+    manifest is created or consumed downstream.
+    """
+
+    schedule = expected_pilot_schedule(config)
+    expected_steps = {
+        "S0": 0,
+        "S50": schedule.s50_steps,
+        "S100": schedule.s100_steps,
+    }
+    expected_parents = {
+        "S0": None,
+        "S50": CheckpointIdentity(run_id, "S0", expected_steps["S0"]).checkpoint_id,
+        "S100": CheckpointIdentity(run_id, "S50", expected_steps["S50"]).checkpoint_id,
+    }
+    if name not in expected_steps:
+        raise ValueError("Clean checkpoint name must be one of S0, S50, or S100")
+    if global_step != expected_steps[name]:
+        raise ValueError(
+            f"Clean checkpoint {name} must have global_step {expected_steps[name]}, "
+            f"got {global_step}"
+        )
+    if parent_checkpoint_id != expected_parents[name]:
+        raise ValueError(
+            f"Clean checkpoint {name} must have parent_checkpoint_id "
+            f"{expected_parents[name]!r}, got {parent_checkpoint_id!r}"
+        )
+
+
 def build_checkpoint_manifest(
     *,
     config: PilotConfig,
@@ -31,7 +76,42 @@ def build_checkpoint_manifest(
     parent_checkpoint_id: str | None,
     data_metadata: dict[str, Any],
     hardware: dict[str, Any],
+    artifact_fingerprints: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
+    """Build provenance for S0/S50/S100, including local artifact integrity.
+
+    S0 is an intentionally remote, pinned-base-model reference and therefore
+    has no local model artifacts.  Materialized S50/S100 checkpoints must pass
+    their model/tokenizer/training-state fingerprints here before downstream
+    contamination is allowed to consume them.
+    """
+
+    validate_clean_checkpoint_identity(
+        config=config,
+        run_id=run_id,
+        name=name,
+        global_step=global_step,
+        parent_checkpoint_id=parent_checkpoint_id,
+    )
+
+    expected_artifact_keys = {
+        "model_directory",
+        "tokenizer_directory",
+        "training_state_file",
+    }
+    artifacts = {
+        "model_directory": None,
+        "tokenizer_directory": None,
+        "training_state_file": None,
+    }
+    if artifact_fingerprints is not None:
+        unknown = set(artifact_fingerprints) - expected_artifact_keys
+        if unknown:
+            raise ValueError(f"Unknown checkpoint artifact fingerprint keys: {sorted(unknown)}")
+        artifacts.update(artifact_fingerprints)
+    if any(value is not None and (not isinstance(value, str) or not value) for value in artifacts.values()):
+        raise ValueError("Checkpoint artifact fingerprints must be non-empty strings or null")
+
     payload = {
         "checkpoint_id": CheckpointIdentity(run_id, name, global_step).checkpoint_id,
         "run_id": run_id,
@@ -65,10 +145,11 @@ def build_checkpoint_manifest(
         "precision": config.model.dtype,
         "gradient_checkpointing": config.model.gradient_checkpointing,
         "hardware": hardware,
+        "artifact_fingerprints": artifacts,
     }
     payload["manifest"] = build_manifest(
         artifact_type="clean_specialization_checkpoint",
-        schema_version="clean-specialization-checkpoint-v1",
+        schema_version=CLEAN_CHECKPOINT_MANIFEST_SCHEMA,
         payload=payload,
         source_metadata={"run_id": run_id, "checkpoint": name},
     )

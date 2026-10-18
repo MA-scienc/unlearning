@@ -2,12 +2,31 @@ import unittest
 
 from unlearning.evaluation.multiple_choice import (
     bootstrap_accuracy_ci,
+    multiple_choice_labels,
     score_from_option_logprobs,
     summarize_mc_results,
 )
+from unlearning.evaluation.clean_checkpoints import task_evaluation_inputs
 
 
 class MultipleChoiceEvalTests(unittest.TestCase):
+    def test_multiple_choice_labels_are_independent_of_option_wording(self):
+        self.assertEqual(multiple_choice_labels(4), ["A", "B", "C", "D"])
+        self.assertEqual(multiple_choice_labels(2), ["A", "B"])
+        with self.assertRaises(ValueError):
+            multiple_choice_labels(1)
+
+    def test_medmcqa_scores_labels_not_full_option_wording(self):
+        record = {
+            "question": "Which option is correct?",
+            "options": ["short", "a deliberately much longer answer option", "third", "fourth"],
+            "answer_index": 1,
+        }
+        _prompt, score_options, answer_index, normalize = task_evaluation_inputs(record, "medmcqa")
+        self.assertEqual(score_options, ["A", "B", "C", "D"])
+        self.assertEqual(answer_index, 1)
+        self.assertFalse(normalize)
+
     def test_option_logprob_scoring(self):
         result = score_from_option_logprobs(
             record_id="q1",

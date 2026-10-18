@@ -42,6 +42,8 @@ dev = [
 [project.scripts]
 unlearning-preflight = "unlearning.experiments.preflight:main"
 unlearning-specialize-clean = "unlearning.training.specialize_clean:main"
+unlearning-contaminate = "unlearning.training.contaminate:main"
+unlearning-unlearn = "unlearning.training.unlearn:main"
 unlearning-evaluate-clean = "unlearning.evaluation.clean_checkpoints:main"
 
 [tool.setuptools.packages.find]

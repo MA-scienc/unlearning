@@ -11,6 +11,13 @@ class NamingTests(unittest.TestCase):
         self.assertEqual(experiment_run_id(config), experiment_run_id(config))
         self.assertIn("qwen-qwen2-5-1-5b", experiment_run_id(config))
 
+    def test_run_name_changes_when_scientific_config_changes(self):
+        baseline = PilotConfig.from_dict(minimal_config())
+        changed_raw = minimal_config()
+        changed_raw["specialization"]["learning_rate"] = 3e-5
+        changed = PilotConfig.from_dict(changed_raw)
+        self.assertNotEqual(experiment_run_id(baseline), experiment_run_id(changed))
+
     def test_stage_name_encodes_checkpoint_and_method(self):
         config = PilotConfig.from_dict(minimal_config())
         name = stage_run_name(config, "unlearned", 0.5, method="npo", condition="fixed_exposure", step=50)

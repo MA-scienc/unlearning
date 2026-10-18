@@ -1,8 +1,10 @@
 import unittest
+from collections import Counter
 
 from unlearning.config.schema import ForgetConfig
 from unlearning.data.synthetic_forget import (
     BLOCKLIST,
+    CONCEPTS,
     CONTAMINATION_TEMPLATE_IDS,
     EVAL_TEMPLATE_IDS,
     generate_forget_dataset,
@@ -11,7 +13,7 @@ from unlearning.data.synthetic_forget import (
 
 def forget_config(seed=314159):
     return ForgetConfig(
-        schema_version="synthetic-patient-f-v1",
+        schema_version="synthetic-patient-f-v2",
         seed=seed,
         record_count=120,
         contamination_templates_per_record=8,
@@ -45,6 +47,18 @@ class SyntheticForgetTests(unittest.TestCase):
         self.assertEqual(len(codes), len(set(codes)))
         self.assertEqual(len(codes), 120)
 
+    def test_record_specific_associations_are_not_encoded_by_generation_index(self):
+        dataset = generate_forget_dataset(forget_config())
+        observed_conditions = [record["condition"] for record in dataset.records]
+        legacy_cyclic_conditions = [
+            CONCEPTS[index % len(CONCEPTS)]["condition"]
+            for index in range(len(dataset.records))
+        ]
+        self.assertNotEqual(observed_conditions, legacy_cyclic_conditions)
+        self.assertEqual(sorted(Counter(observed_conditions).values()), [12] * len(CONCEPTS))
+        for index, record in enumerate(dataset.records):
+            self.assertNotIn(f"{index + 1000:04d}", record["private_code"])
+
     def test_template_train_eval_separation(self):
         self.assertTrue(set(CONTAMINATION_TEMPLATE_IDS).isdisjoint(EVAL_TEMPLATE_IDS))
         dataset = generate_forget_dataset(forget_config())
@@ -74,6 +88,9 @@ class SyntheticForgetTests(unittest.TestCase):
             self.assertEqual(len(decoys), len(set(decoys)))
             self.assertNotIn(example["target"], decoys)
             self.assertTrue(set(decoys).issubset(conditions))
+            self.assertEqual(len(example["options"]), 4)
+            self.assertEqual(len(example["options"]), len(set(example["options"])))
+            self.assertEqual(example["options"][example["answer_index"]], example["target"])
 
     def test_mc_probes_are_deterministic(self):
         left = [

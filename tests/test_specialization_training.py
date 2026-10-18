@@ -69,6 +69,18 @@ class SpecializationTrainingTests(unittest.TestCase):
         self.assertEqual(s100["global_step"], 3290)
         self.assertEqual(s100["parent_checkpoint_id"], s50["checkpoint_id"])
 
+    def test_checkpoint_manifest_rejects_mislabeled_clean_trajectory_stage(self):
+        with self.assertRaisesRegex(ValueError, "S50 must have global_step 1645"):
+            build_checkpoint_manifest(
+                config=self.config,
+                run_id="run",
+                name="S50",
+                global_step=0,
+                parent_checkpoint_id="run::S0::step0000",
+                data_metadata={"train_record_fingerprint": "abc"},
+                hardware={"gpu": "mock"},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

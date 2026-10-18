@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from typing import Any
 
 
+_CHOICE_LABELS = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+
 @dataclass(frozen=True)
 class MultipleChoiceResult:
     record_id: str
@@ -91,7 +94,31 @@ def pubmedqa_prompt(record: dict[str, Any]) -> str:
     return f"Context:\n{context}\nQuestion: {record['question']}\nAnswer yes, no, or maybe:"
 
 
-def option_logprobs_with_model(model, tokenizer, prompt: str, options: list[str], device: str) -> list[float]:
+def multiple_choice_labels(option_count: int) -> list[str]:
+    """Return canonical answer labels for label-based multiple-choice scoring."""
+
+    if option_count < 2 or option_count > len(_CHOICE_LABELS):
+        raise ValueError(f"Unsupported multiple-choice option count: {option_count}")
+    return list(_CHOICE_LABELS[:option_count])
+
+
+def option_logprobs_with_model(
+    model,
+    tokenizer,
+    prompt: str,
+    options: list[str],
+    device: str,
+    *,
+    normalize_by_token_count: bool = False,
+) -> list[float]:
+    """Score each completion conditional on the same prompt.
+
+    Multiple-choice tasks should normally pass answer labels (for example A/B/C/D),
+    which avoids confounding a model's choice with the length of option wording.
+    For word-valued classes such as PubMedQA, token-count normalization is available
+    as a diagnostic to prevent longer labels receiving an automatic penalty.
+    """
+
     try:
         import torch
     except ImportError as exc:
@@ -103,13 +130,15 @@ def option_logprobs_with_model(model, tokenizer, prompt: str, options: list[str]
     with torch.no_grad():
         for option in options:
             option_ids = tokenizer.encode(f" {option}", add_special_tokens=False)
+            if not option_ids:
+                raise ValueError(f"Option tokenized to no tokens: {option!r}")
             input_ids = torch.tensor([prompt_ids + option_ids], dtype=torch.long, device=device)
             outputs = model(input_ids=input_ids)
             log_probs = torch.log_softmax(outputs.logits[:, :-1, :], dim=-1)
             total = 0.0
             for pos, token_id in enumerate(option_ids, start=len(prompt_ids)):
                 total += float(log_probs[0, pos - 1, token_id].detach().cpu())
-            scores.append(total)
+            scores.append(total / len(option_ids) if normalize_by_token_count else total)
     return scores
 
 

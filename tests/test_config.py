@@ -46,7 +46,7 @@ def minimal_config():
             "checkpoint_fractions": [0.0, 0.5, 1.0],
         },
         "forget": {
-            "schema_version": "synthetic-patient-f-v1",
+            "schema_version": "synthetic-patient-f-v2",
             "seed": 314159,
             "record_count": 120,
             "contamination_templates_per_record": 8,
@@ -57,6 +57,7 @@ def minimal_config():
         "contamination": {
             "condition": "fixed_exposure",
             "learning_rate": 0.00001,
+            "weight_decay": 0.0,
             "epochs": 10,
             "effective_batch_size": 16,
             "sequence_length": 512,
@@ -70,6 +71,8 @@ def minimal_config():
             "methods": {
                 "ga": {
                     "learning_rate": 0.000001,
+                    "weight_decay": 0.0,
+                    "scheduler": "constant",
                     "steps": 400,
                     "effective_batch_size": 16,
                     "sequence_length": 512,
@@ -77,6 +80,8 @@ def minimal_config():
                 },
                 "npo": {
                     "learning_rate": 0.000001,
+                    "weight_decay": 0.0,
+                    "scheduler": "constant",
                     "steps": 400,
                     "effective_batch_size": 16,
                     "sequence_length": 512,
@@ -133,6 +138,16 @@ class ConfigTests(unittest.TestCase):
     def test_rejects_wrong_eval_template_count(self):
         raw = minimal_config()
         raw["forget"]["eval_templates_per_record"] = 5
+        with self.assertRaises(ConfigError):
+            PilotConfig.from_dict(raw)
+
+    def test_rejects_implicit_or_nonconstant_unlearning_optimizer_schedule(self):
+        raw = minimal_config()
+        raw["unlearning"]["methods"]["ga"]["scheduler"] = "linear"
+        with self.assertRaises(ConfigError):
+            PilotConfig.from_dict(raw)
+        raw = minimal_config()
+        raw["contamination"]["weight_decay"] = -0.01
         with self.assertRaises(ConfigError):
             PilotConfig.from_dict(raw)
 

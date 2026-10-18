@@ -42,7 +42,7 @@ specialization:
   checkpoint_fractions: [0.0, 0.5, 1.0]
 
 forget:
-  schema_version: synthetic-patient-f-v1
+  schema_version: synthetic-patient-f-v2
   seed: 314159
   record_count: 120
   contamination_templates_per_record: 8
@@ -53,6 +53,7 @@ forget:
 contamination:
   condition: fixed_exposure
   learning_rate: 0.00001
+  weight_decay: 0.0
   epochs: 10
   effective_batch_size: 16
   sequence_length: 512
@@ -66,12 +67,16 @@ unlearning:
   methods:
     ga:
       learning_rate: 0.000001
+      weight_decay: 0.0
+      scheduler: constant
       steps: 400
       effective_batch_size: 16
       sequence_length: 512
       gradient_clip_norm: 1.0
     npo:
       learning_rate: 0.000001
+      weight_decay: 0.0
+      scheduler: constant
       steps: 400
       effective_batch_size: 16
       sequence_length: 512

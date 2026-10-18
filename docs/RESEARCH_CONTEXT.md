@@ -89,25 +89,24 @@ Therefore, the present project focuses first on discovering and characterizing a
 # Current Scientific Contribution
 
 The study investigates domain specialization as an independent experimental variable.
+The implemented feasibility pilot uses S0, S50, and S100 only. S25 and S75
+belong to the later confirmatory design; they must not be implied by pilot
+results.
 
-The conceptual pipeline is:
+The pilot pipeline is:
 
 Base model
 |
 | domain adaptation
 |
 +-- S0
-+-- S25
 +-- S50
-+-- S75
 +-- S100
 
 Then every clean specialization checkpoint receives the same controlled forget dataset F:
 
 S0   + F -> C0
-S25  + F -> C25
 S50  + F -> C50
-S75  + F -> C75
 S100 + F -> C100
 
 Then an unlearning method U is applied:
@@ -122,7 +121,7 @@ U_i versus S_i.
 
 ---
 
-# Meaning of 0%, 25%, 50%, 75%, 100%
+# Meaning of 0%, 50%, 100% in the pilot
 
 These values represent progress through a fixed domain-adaptation training budget.
 
@@ -131,10 +130,11 @@ Example:
 If full domain adaptation is defined as 20,000 optimization steps:
 
 S0    = 0 steps
-S25   = 5,000 steps
 S50   = 10,000 steps
-S75   = 15,000 steps
 S100  = 20,000 steps
+
+The confirmatory study may add S25 and S75, but these are not part of the
+current pilot's scientific unit or artifact plan.
 
 Alternatively, checkpoints could correspond to predetermined fractions of epochs.
 
