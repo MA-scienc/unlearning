@@ -50,7 +50,14 @@ python -m pytest -q                  # should pass in a few seconds
 
 Windows settings that otherwise ruin long runs:
 
-1. **Power**: plugged in, *Sleep: Never*, *Turn off display* is fine. Pause Windows Update for the run.
+1. **Power**: keep the charger connected for the whole run, and pause Windows Update. On
+   2026-10-25 the laptop came off AC 50 minutes into specialization, ran down to critical
+   battery and slept briefly; the run survived, but it took 16.3 h instead of ~6.5 h. Even
+   on AC, unattended steps ran ~2.8x slower (GPU idle ~70%: Windows deprioritized the
+   background process). Every pipeline process now opts out of Windows background power
+   throttling and keeps the system and display awake while it runs
+   (`UNLEARNING_DISABLE_POWER_THROTTLING`, `UNLEARNING_KEEP_DISPLAY_ON` in `.env`). The
+   dashboard warns when the laptop is on battery. Prefer leaving the session unlocked.
 2. **NVIDIA Control Panel → Manage 3D settings → CUDA - Sysmem Fallback Policy → Prefer No Sysmem Fallback**.
    Without this, running out of GPU memory silently spills into system RAM and
    training becomes many times slower instead of failing clearly.
@@ -192,4 +199,5 @@ plus activations), so 3B needs roughly 40 GB GPUs or larger.
 | `has partial outputs ... Rerun with --resume` | A stage was started before; the pipeline always passes `--resume`; by hand add it. |
 | `Refusing to resume: the inputs no longer match the run plan` | Config or data changed mid-stage. Restore them, or `--overwrite` to start that stage over. |
 | Training suddenly much slower, GPU memory ~100% | Windows shared-memory fallback (see §2) or thermal throttling (dashboard shows it). |
+| Training ~3x slower, GPU utilization ~25%, normal clocks | Laptop on battery (dashboard shows it), or Windows throttling an unattended background process (see §2, item 1). |
 | `Frozen S50/S100 steps do not match the approved pilot protocol` | The tokenized data no longer produces the frozen 3,290-step budget; check the preflight report before anything else. |

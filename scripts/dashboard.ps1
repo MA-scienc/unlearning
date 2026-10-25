@@ -264,6 +264,18 @@ function Show-Frame {
         if ($used -and $total -and ($used / $total) -gt 0.96) { $warnings.Add("GPU memory almost full: Windows may spill into shared system memory (very slow). Lower the micro-batch and --resume.") }
     }
 
+    try {
+        $battery = Get-CimInstance Win32_Battery -ErrorAction Stop | Select-Object -First 1
+        if ($battery) {
+            if ($battery.BatteryStatus -eq 2) {
+                Write-Line ("power on AC (battery {0}%)" -f $battery.EstimatedChargeRemaining) "Gray"
+            } else {
+                Write-Line ("power ON BATTERY ({0}%)" -f $battery.EstimatedChargeRemaining) "Red"
+                $warnings.Add("laptop is on battery: training slows sharply and the machine sleeps at critical battery. Plug in the charger.")
+            }
+        }
+    } catch {}
+
     if ($warnings.Count -gt 0) {
         Write-Line ("-" * 78) "DarkGray"
         foreach ($warning in $warnings) { Write-Line ("WARNING  " + $warning) "Yellow" }

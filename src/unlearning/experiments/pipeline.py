@@ -393,38 +393,7 @@ def _run_command(command: list[str], log_path: Path, *, offline: bool = False) -
                 signal.signal(signal.SIGTERM, previous_term)
 
 
-def keep_system_awake(enabled: bool) -> None:
-    """On Windows, ask the OS not to idle-sleep while the pipeline runs.
-
-    Uses SetThreadExecutionState (as media players do): no power settings are
-    changed, the display may still turn off, and the request ends with the
-    process. Closing a laptop lid can still sleep the machine depending on the
-    lid setting.
-    """
-
-    if os.name != "nt":
-        return
-    try:
-        import ctypes
-
-        es_continuous, es_system_required = 0x80000000, 0x00000001
-        flags = es_continuous | (es_system_required if enabled else 0)
-        ctypes.windll.kernel32.SetThreadExecutionState(flags)
-    except Exception:
-        pass
-
-
 def run_pipeline(pipeline: PilotPipeline, *, until: str | None = None, dry_run: bool = False) -> int:
-    if not dry_run:
-        keep_system_awake(True)
-    try:
-        return _run_pipeline(pipeline, until=until, dry_run=dry_run)
-    finally:
-        if not dry_run:
-            keep_system_awake(False)
-
-
-def _run_pipeline(pipeline: PilotPipeline, *, until: str | None = None, dry_run: bool = False) -> int:
     jobs = pipeline.jobs()
     ids = [job.id for job in jobs]
     if until is not None and until not in ids:
