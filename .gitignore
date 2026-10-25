@@ -8,6 +8,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+*.egg-info/
 
 # Environments and local configuration
 .env
@@ -26,6 +27,7 @@ env/
 Thumbs.db
 
 # Large or generated experiment artifacts
+hf_cache/
 data/raw/
 data/interim/
 data/processed/

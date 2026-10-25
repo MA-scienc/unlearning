@@ -36,7 +36,6 @@ def minimal_config():
             "context_length": 1024,
             "epochs": 3,
             "effective_batch_sequences": 32,
-            "micro_batch_sequences": 1,
             "learning_rate": 0.00002,
             "weight_decay": 0.0,
             "warmup_ratio": 0.03,

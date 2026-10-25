@@ -77,6 +77,7 @@ def build_checkpoint_manifest(
     data_metadata: dict[str, Any],
     hardware: dict[str, Any],
     artifact_fingerprints: dict[str, str | None] | None = None,
+    execution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build provenance for S0/S50/S100, including local artifact integrity.
 
@@ -147,6 +148,9 @@ def build_checkpoint_manifest(
         "hardware": hardware,
         "artifact_fingerprints": artifacts,
     }
+    if execution is not None:
+        # Which process segments (start/resume) produced this checkpoint.
+        payload["execution"] = execution
     payload["manifest"] = build_manifest(
         artifact_type="clean_specialization_checkpoint",
         schema_version=CLEAN_CHECKPOINT_MANIFEST_SCHEMA,

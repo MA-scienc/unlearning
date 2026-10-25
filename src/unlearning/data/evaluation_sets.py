@@ -147,18 +147,20 @@ def prepare_mmlu_cf(
             config.evaluation.mmlu_cf_dataset_id,
             revision=config.evaluation.mmlu_cf_revision,
         )
-        split_infos = builder.info.splits
+        dataset = load_dataset(
+            config.evaluation.mmlu_cf_dataset_id,
+            split=config.evaluation.mmlu_cf_split,
+            revision=config.evaluation.mmlu_cf_revision,
+        )
+        # On a first, uncached load some `datasets` versions expose no split
+        # metadata on the builder; the prepared dataset always carries it.
+        split_infos = builder.info.splits or dataset.info.splits or {}
         suffix = f"_{config.evaluation.mmlu_cf_split}"
         category_ranges = [
             (name[: -len(suffix)].replace("_", " "), info.num_examples)
             for name, info in split_infos.items()
             if name.endswith(suffix) and name != config.evaluation.mmlu_cf_split
         ]
-        dataset = load_dataset(
-            config.evaluation.mmlu_cf_dataset_id,
-            split=config.evaluation.mmlu_cf_split,
-            revision=config.evaluation.mmlu_cf_revision,
-        )
         category_by_index: list[str | None] = []
         for category, count in category_ranges:
             category_by_index.extend([category] * count)

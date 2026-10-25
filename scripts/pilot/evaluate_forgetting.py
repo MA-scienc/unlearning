@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from unlearning.config import load_config
+from unlearning.runtime.settings import default_config_path
 from unlearning.evaluation.forgetting import (
     decoy_values_from_records,
     evaluate_forgetting_with_model,
@@ -26,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
             "operating point."
         )
     )
-    parser.add_argument("--config", default="configs/pilot/base.yaml")
+    parser.add_argument("--config", default=default_config_path())
     parser.add_argument(
         "--model",
         required=True,

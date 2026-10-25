@@ -1,8 +1,11 @@
+"""Hardware and software inspection recorded in every manifest."""
+
 from __future__ import annotations
 
 import platform
 import shutil
 import subprocess
+from importlib import metadata
 
 
 def _bytes_to_gib(value: int) -> float:
@@ -115,27 +118,49 @@ def _bitsandbytes_info() -> dict:
     return {"available": True, "version": getattr(bnb, "__version__", None)}
 
 
-def inspect_hardware() -> dict:
-    gpu = _nvidia_smi()
-    max_gpu_mem_gib = 0.0
-    if gpu.get("available"):
-        max_gpu_mem_gib = max(device["memory_mb"] for device in gpu["devices"]) / 1024
+def inspect_hardware(disk_path: str = ".") -> dict:
     return {
         "platform": platform.platform(),
         "python": platform.python_version(),
         "machine": platform.machine(),
         "processor": platform.processor(),
         "total_ram_gib": _total_ram_gib(),
-        "disk": _disk_usage_gib(),
-        "nvidia_smi": gpu,
+        "disk": _disk_usage_gib(disk_path),
+        "nvidia_smi": _nvidia_smi(),
         "torch": _torch_info(),
         "bitsandbytes": _bitsandbytes_info(),
-        "full_parameter_qwen2p5_1p5b_feasibility": {
-            "realistically_feasible_here": bool(max_gpu_mem_gib >= 24),
-            "reason": (
-                "Estimated full-parameter bf16 Qwen2.5-1.5B training with optimizer states "
-                "is most realistic on a CUDA GPU with at least 24 GiB VRAM; 8-bit AdamW and "
-                "gradient checkpointing reduce memory but do not make CPU/no-GPU training practical."
-            ),
-        },
     }
+
+
+_VERSIONED_PACKAGES = (
+    "torch",
+    "transformers",
+    "accelerate",
+    "bitsandbytes",
+    "datasets",
+    "tokenizers",
+    "safetensors",
+    "huggingface-hub",
+    "numpy",
+    "nvidia-ml-py",
+    "llm-specialization-unlearning",
+)
+
+
+def software_versions() -> dict:
+    """Python, platform, CUDA and pinned library versions for reproducibility records."""
+
+    versions: dict = {"python": platform.python_version(), "platform": platform.platform()}
+    for package in _VERSIONED_PACKAGES:
+        try:
+            versions[package] = metadata.version(package)
+        except metadata.PackageNotFoundError:
+            versions[package] = None
+    try:
+        import torch
+
+        versions["torch_cuda"] = getattr(torch.version, "cuda", None)
+        versions["cudnn"] = torch.backends.cudnn.version() if torch.backends.cudnn.is_available() else None
+    except Exception:
+        versions["torch_cuda"] = None
+    return versions

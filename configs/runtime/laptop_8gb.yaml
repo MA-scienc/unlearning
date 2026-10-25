@@ -1,0 +1,32 @@
+# Runtime profile: how to execute on this hardware. Nothing here changes the
+# science -- every optimizer step sees the same examples and the same loss for
+# any micro-batch size or GPU count (see src/unlearning/training/engine.py).
+# Recorded in every manifest; not part of run IDs.
+name: laptop_8gb
+description: Single RTX 4070 Laptop GPU (8 GB), one process, plain `python` launch.
+launcher: python            # python | accelerate
+accelerate_config: null     # path to an `accelerate config` YAML when launcher is accelerate
+
+# Sequences / examples per forward pass on each GPU. Lower these if you hit
+# out-of-memory, then rerun the same stage with --resume.
+# Chosen from the 2026-10-24 benchmark sweep on the RTX 4070 Laptop (8 GB):
+#   specialization 1: 6.6 s/step, 5.9 GB reserved (2: slower; 4: spills past VRAM, 29 s/step)
+#   contamination 8:  0.49 s/step, 6.0 GB (16 exceeds VRAM)
+#   unlearning 8:     0.49 s/step, 6.1 GB for GA and NPO (16 exceeds VRAM)
+micro_batch:
+  specialization: 1         # packed 1024-token MedMCQA sequences; must divide 32
+  contamination: 8          # F examples; must divide 16
+  unlearning: 8             # F examples; must divide 16
+  npo_reference: 8          # = unlearning: the frozen reference pass then sees the same batches as training
+
+checkpointing:
+  resume_every_minutes: 30  # operational resume points (runs/<run_id>/<stage>/resume)
+  keep_last: 2
+
+logging:
+  console_every_steps: 10
+  system_sample_seconds: 30 # GPU temperature/power/memory samples -> system.jsonl
+
+monitoring:
+  specialization_dev_every_steps: 200   # held-out MedMCQA dev loss (monitoring only)
+  specialization_dev_sequences: 32

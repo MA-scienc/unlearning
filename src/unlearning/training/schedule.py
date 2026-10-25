@@ -12,8 +12,6 @@ class SpecializationSchedule:
     s100_steps: int
     step_adjustment: int
     effective_batch_sequences: int
-    micro_batch_sequences: int
-    gradient_accumulation_steps: int
 
     @property
     def checkpoint_steps(self) -> tuple[int, int]:
@@ -31,18 +29,15 @@ def freeze_even_s100(provisional_s100_steps: int) -> tuple[int, int]:
 
 def build_schedule(config: PilotConfig, provisional_s100_steps: int) -> SpecializationSchedule:
     frozen_s100, adjustment = freeze_even_s100(provisional_s100_steps)
-    effective = config.specialization.effective_batch_sequences
-    micro = config.specialization.micro_batch_sequences
-    if effective % micro != 0:
-        raise ValueError("effective batch size must be divisible by micro batch size")
+    # Micro-batching is an execution detail (runtime profile), not part of the
+    # frozen schedule: the engine keeps the step's objective identical for any
+    # micro-batch size or process count.
     return SpecializationSchedule(
         provisional_s100_steps=provisional_s100_steps,
         s50_steps=frozen_s100 // 2,
         s100_steps=frozen_s100,
         step_adjustment=adjustment,
-        effective_batch_sequences=effective,
-        micro_batch_sequences=micro,
-        gradient_accumulation_steps=effective // micro,
+        effective_batch_sequences=config.specialization.effective_batch_sequences,
     )
 
 

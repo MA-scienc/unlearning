@@ -688,6 +688,9 @@ def generate_with_model(
     input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
     generation_kwargs: dict[str, Any] = {
         "input_ids": input_ids,
+        # One unpadded prompt: an all-ones mask is what generate() falls back to anyway;
+        # passing it explicitly avoids the pad==eos ambiguity warning.
+        "attention_mask": torch.ones_like(input_ids),
         "max_new_tokens": max_new_tokens,
         "do_sample": False,
     }

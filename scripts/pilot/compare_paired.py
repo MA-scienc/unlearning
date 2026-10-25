@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from unlearning.config import load_config
+from unlearning.runtime.settings import default_config_path
 from unlearning.evaluation.comparison import compare_result_files
 from unlearning.utils.io import write_json
 
@@ -18,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
             "bootstrap inference. The mean delta is comparison minus baseline."
         )
     )
-    parser.add_argument("--config", default="configs/pilot/base.yaml")
+    parser.add_argument("--config", default=default_config_path())
     parser.add_argument("--baseline", required=True)
     parser.add_argument("--comparison", required=True)
     parser.add_argument("--metric", required=True)

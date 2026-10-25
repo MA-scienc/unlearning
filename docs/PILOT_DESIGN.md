@@ -22,6 +22,12 @@ S0, S50, and S100 mean 0%, 50%, and 100% of that predefined domain-adaptation tr
 
 Proposed choice: `Qwen/Qwen2.5-1.5B`, base model, not instruction-tuned. Pin the exact Hugging Face revision before any run.
 
+> **Amendment (2026-10-22):** the exploratory pilot runs on `Qwen/Qwen2.5-0.5B`
+> (`configs/pilot/qwen2.5-0.5b_laptop.yaml`, same recipe otherwise) because
+> full-parameter 1.5B training does not fit the available 8 GB GPU. The same
+> tokenizer reproduces the frozen 1645/3290-step budget. 1.5B/3B runs are planned
+> on rented GPUs. See the amendment log in [CONFIRMATORY_PROTOCOL.md](CONFIRMATORY_PROTOCOL.md).
+
 Scientific rationale:
 
 - The model is small enough for a pilot while still being a modern causal LM with nontrivial general and medical-domain behavior.
@@ -50,7 +56,7 @@ Major confounds:
 
 Proposed choice: MedMCQA training split only, formatted as causal language modeling text containing question, options, correct answer, subject, topic, and explanation. Do not train on MedMCQA validation or test examples.
 
-Implementation note: the Hugging Face mirror names the labeled 6,150-example official development split `test`, while its `validation` split contains 4,183 held-out examples with unavailable labels. The pilot config treats HF `test` as the labeled dev/evaluation split and keeps HF `validation` separated as the unlabeled test split. Neither split enters specialization training.
+Implementation note (corrected 2026-10-24): the Hugging Face mirror's `validation` split is the official MedMCQA development split (4,183 examples, labels public) and its `test` split is the official test split (6,150 examples, labels withheld; every row of the pinned revision has no answer). The pilot evaluates on HF `validation` and keeps HF `test` only for train/eval separation checks. An earlier version of this note had the two inverted, which would have made all MedMCQA evaluation sets unlabeled; it was corrected before any evaluation was run. Neither split enters specialization training.
 
 Scientific rationale:
 

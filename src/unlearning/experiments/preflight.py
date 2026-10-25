@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 
@@ -16,6 +17,9 @@ from unlearning.data.packing import compute_step_counts, tokenize_and_pack_texts
 from unlearning.data.safeguards import assert_no_forget_terms_in_texts
 from unlearning.data.synthetic_forget import generate_forget_dataset, write_forget_dataset
 from unlearning.experiments.naming import experiment_run_id
+from unlearning.runtime.layout import StorageLayout
+from unlearning.runtime.stage import invalidate
+from unlearning.runtime.settings import default_config_path
 from unlearning.utils.env import inspect_hardware
 from unlearning.utils.io import ensure_dir, write_json
 from unlearning.utils.manifest import build_manifest
@@ -65,10 +69,19 @@ def run_preflight(
     overwrite: bool = False,
 ) -> dict:
     config = load_config(config_path)
-    run_id = experiment_run_id(config)
-    generated_root = Path(output_root) if output_root else config.paths.generated_dir / run_id
+    layout = StorageLayout.for_config(config)
+    final_root = Path(output_root) if output_root else layout.generated
+    if (final_root / "preflight_report.json").is_file() and not overwrite:
+        raise FileExistsError(
+            f"Preflight artifacts already exist in {final_root}; pass --overwrite to regenerate "
+            "(the old folder is renamed *__invalidated_<time>, not deleted)."
+        )
+    # Build everything in <root>.tmp and rename only when complete, so an
+    # interrupted preflight never leaves a half-written artifact folder behind.
+    generated_root = final_root.with_name(final_root.name + ".tmp")
+    if generated_root.exists():
+        shutil.rmtree(generated_root)
     ensure_dir(generated_root)
-    ensure_dir(config.paths.manifest_dir)
 
     forget = generate_forget_dataset(config.forget)
     forget_result = write_forget_dataset(
@@ -92,6 +105,13 @@ def run_preflight(
 
     if not skip_external:
         medmcqa_result = prepare_medmcqa(config, generated_root / "medmcqa", overwrite=overwrite)
+        unlabeled = sum(1 for record in medmcqa_result.dev_records if record.get("answer_index") is None)
+        if unlabeled:
+            raise ValueError(
+                f"MedMCQA dev split {config.specialization.dev_split!r} has {unlabeled} of "
+                f"{len(medmcqa_result.dev_records)} records without an answer label; every evaluation "
+                "set built from it would be unscorable. Check specialization.dev_split."
+            )
         train_texts = [record["specialization_text"] for record in medmcqa_result.train_records]
         assert_no_forget_terms_in_texts(forget.records, train_texts)
 
@@ -183,13 +203,21 @@ def run_preflight(
     )
     report["manifest"] = manifest
     write_json(generated_root / "preflight_report.json", report, overwrite=overwrite)
+    if final_root.exists():
+        for moved in invalidate([final_root]):
+            print(f"[preflight] previous artifacts set aside -> {moved}", flush=True)
+    generated_root.rename(final_root)
     return report
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run data/config preflight without training.")
-    parser.add_argument("--config", default="configs/pilot/base.yaml")
-    parser.add_argument("--output-root", default=None)
+    parser.add_argument("--config", default=default_config_path())
+    parser.add_argument(
+        "--output-root",
+        default=None,
+        help="Where to write artifacts (default: <storage>/data/generated/<run_id>).",
+    )
     parser.add_argument(
         "--skip-external",
         action="store_true",

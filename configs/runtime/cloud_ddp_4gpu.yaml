@@ -1,0 +1,27 @@
+# Runtime profile for a rented node with 4 GPUs using Distributed Data Parallel
+# through Hugging Face Accelerate. The pipeline launches training stages with
+#   accelerate launch --config_file configs/accelerate/ddp_4gpu.yaml <script> ...
+# Each micro-batch size x 4 GPUs must divide the effective batch (32 / 16).
+# DDP keeps a full model + optimizer copy per GPU: for 3B use >= 40 GB GPUs.
+name: cloud_ddp_4gpu
+description: 4 GPUs on one node, DDP via accelerate launch.
+launcher: accelerate
+accelerate_config: configs/accelerate/ddp_4gpu.yaml
+
+micro_batch:
+  specialization: 4         # 32 = 4 per GPU x 4 GPUs x 2 accumulation micro-steps
+  contamination: 4          # 16 = 4 x 4 GPUs
+  unlearning: 4             # 16 = 4 x 4 GPUs
+  npo_reference: 4          # = unlearning, so the reference pass sees the same batches as training
+
+checkpointing:
+  resume_every_minutes: 20
+  keep_last: 2
+
+logging:
+  console_every_steps: 10
+  system_sample_seconds: 30
+
+monitoring:
+  specialization_dev_every_steps: 200
+  specialization_dev_sequences: 64

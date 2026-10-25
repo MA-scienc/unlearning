@@ -19,6 +19,7 @@ import json
 import math
 import random
 import re
+import sys
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -28,8 +29,47 @@ from typing import Any, Iterable, Sequence
 
 from unlearning.config import PilotConfig, load_config, validate_training_ready
 from unlearning.experiments.naming import experiment_run_id, stage_run_name
+from unlearning.runtime.hardware import (
+    precheck_gpu_training,
+    require_free_disk,
+    require_gpu_training,
+)
+from unlearning.runtime.layout import StorageLayout
+from unlearning.runtime.monitor import GpuSampler, SystemMonitor, ThermalGuard
+from unlearning.runtime.profile import load_runtime_profile, micro_steps_per_rank
+from unlearning.runtime.resume import (
+    TRAINING_STATE_FILE,
+    ResumePoint,
+    ResumeStore,
+    begin_atomic_dir,
+    build_training_state,
+    commit_atomic_dir,
+    latest_point,
+    remove_stale_temporaries,
+)
+from unlearning.runtime.run_log import RunLog
+from unlearning.runtime.settings import MachineSettings, default_config_path, default_runtime_path
+from unlearning.runtime.signals import INTERRUPTED_EXIT_CODE, GracefulStop, StageInterrupted
+from unlearning.runtime.stage import (
+    STAGE_COMPLETE,
+    STAGE_FRESH,
+    ExecutionRecord,
+    StageAlreadyStarted,
+    prepare_stage,
+    segment_details,
+    verify_or_write_run_plan,
+)
 from unlearning.training.contaminate import CONTAMINATION_MANIFEST_SCHEMA
-from unlearning.utils.env import inspect_hardware
+from unlearning.training.engine import (
+    MicroBatch,
+    TrainingLoop,
+    apply_resume_state,
+    create_accelerator,
+    enable_memory_saving,
+    split_into_micro_batches,
+    supervised_token_count,
+)
+from unlearning.utils.env import software_versions
 from unlearning.utils.hashing import fingerprint_directory, fingerprint_payload, hash_file
 from unlearning.utils.io import ensure_dir, read_json, read_jsonl, write_json
 from unlearning.utils.manifest import build_manifest
@@ -39,6 +79,7 @@ IGNORE_INDEX = -100
 PILOT_SNAPSHOT_STEPS = (0, 50, 100, 200, 400)
 _CONTAMINATED_NAME_RE = re.compile(r"^C(0|50|100)$")
 UNLEARNING_SNAPSHOT_MANIFEST_SCHEMA = "unlearning-snapshot-v2"
+REFERENCE_CACHE_FILE = "reference_completion_logprobs.json"
 
 
 @dataclass(frozen=True)
@@ -850,41 +891,6 @@ def _plan_payload(
     }
 
 
-def precheck_unlearning_environment() -> dict[str, Any]:
-    """Report whether the frozen full-parameter CUDA protocol can be attempted."""
-
-    hardware = inspect_hardware()
-    torch_info = hardware.get("torch", {})
-    bnb_info = hardware.get("bitsandbytes", {})
-    compatible = (
-        bool(torch_info.get("available"))
-        and bool(torch_info.get("cuda_available"))
-        and bool(bnb_info.get("available"))
-    )
-    devices = torch_info.get("devices") or []
-    if devices:
-        compatible = compatible and bool(devices[0].get("bf16_supported")) and int(
-            devices[0].get("total_memory_mb", 0)
-        ) >= 24_000
-    else:
-        compatible = False
-    hardware["pilot_unlearning_protocol_compatible"] = compatible
-    hardware["npo_reference_strategy"] = (
-        "cache frozen C_i completion log-probabilities before optimization; "
-        "do not retain a second model during optimizer steps"
-    )
-    return hardware
-
-
-def _prepare_output_dir(run_dir: Path, *, overwrite: bool) -> None:
-    if run_dir.exists() and any(run_dir.iterdir()) and not overwrite:
-        raise FileExistsError(
-            f"Refusing to write into existing unlearning trajectory directory: {run_dir}. "
-            "Use a new scientific configuration or pass overwrite=True explicitly."
-        )
-    ensure_dir(run_dir)
-
-
 def _set_seed(torch, seed: int) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
@@ -907,17 +913,114 @@ def _batch_to_device(batch: dict[str, Any], device):
     }
 
 
+class UnlearningObjective:
+    """GA or frozen-reference NPO over each step's fixed batch of F completions.
+
+    GA's objective is the token mean of completion log-probabilities over the
+    whole step batch and NPO's is the example mean of its per-example term; the
+    loss sums returned here are divided by the whole step's token or example
+    count, so micro-batching reproduces the full-batch objective exactly.
+    """
+
+    name = "unlearning"
+
+    def __init__(
+        self,
+        torch,
+        sequences: Sequence[CompletionOnlySequence],
+        *,
+        method: str,
+        batch_size: int,
+        micro_batch_size: int,
+        pad_token_id: int,
+        reference_values: dict[str, float] | None = None,
+        beta: float | None = None,
+    ):
+        if method not in {"ga", "npo"}:
+            raise ValueError("method must be 'ga' or 'npo'")
+        if method == "npo" and (reference_values is None or beta is None or beta <= 0):
+            raise ValueError("NPO requires frozen reference values and a positive beta")
+        if batch_size % micro_batch_size != 0:
+            raise ValueError(f"micro-batch {micro_batch_size} must divide the step batch {batch_size}")
+        self.torch = torch
+        self.sequences = list(sequences)
+        self.method = method
+        self.batch_size = int(batch_size)
+        self.micro = int(micro_batch_size)
+        self.pad_token_id = int(pad_token_id)
+        self.reference_values = reference_values
+        self.beta = beta
+        self.unit = "tokens" if method == "ga" else "examples"
+        self.name = f"unlearning_{method}"
+
+    def micro_batches(self, step: int) -> list[MicroBatch]:
+        torch = self.torch
+        selected = [
+            self.sequences[index]
+            for index in deterministic_batch_indices(
+                step=step,
+                example_count=len(self.sequences),
+                batch_size=self.batch_size,
+            )
+        ]
+        batches = []
+        for chunk in split_into_micro_batches(selected, self.micro):
+            collated = collate_completion_only_batch(chunk, pad_token_id=self.pad_token_id)
+            tensors = {
+                "input_ids": collated["input_ids"],
+                "attention_mask": collated["attention_mask"],
+                "labels": collated["labels"],
+            }
+            if self.method == "npo":
+                tensors["reference_logprob_sums"] = torch.tensor(
+                    [self.reference_values[example_id] for example_id in collated["example_ids"]],
+                    dtype=torch.float32,
+                )
+            batches.append(MicroBatch(tensors, example_ids=tuple(collated["example_ids"])))
+        return batches
+
+    def normalizer(self, step: int, micro_batches) -> float:
+        if self.method == "ga":
+            return float(sum(int(supervised_token_count(batch.tensors["labels"])) for batch in micro_batches))
+        return float(self.batch_size)
+
+    def loss_sum(self, model, batch: dict[str, Any]):
+        torch = self.torch
+        outputs = model(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            use_cache=False,
+        )
+        logprob_sums, token_counts = completion_logprob_sums(outputs.logits, batch["labels"])
+        examples = logprob_sums.numel()
+        if self.method == "ga":
+            total = logprob_sums.sum()
+            return total, {
+                "completion_logprob_per_token": (total.detach(), token_counts.sum()),
+            }
+        reference = batch["reference_logprob_sums"].to(dtype=logprob_sums.dtype).reshape(-1).detach()
+        log_ratio = logprob_sums - reference
+        terms = -(2.0 / self.beta) * torch.nn.functional.logsigmoid(-self.beta * log_ratio)
+        return terms.sum(), {
+            "npo_log_ratio": (log_ratio.detach().sum(), examples),
+            "completion_logprob_per_example": (logprob_sums.detach().sum(), examples),
+        }
+
+
 def _reference_completion_logprob_cache(
     *,
     AutoModelForCausalLM,
     torch,
     source: ContaminatedSource,
     sequences: Sequence[CompletionOnlySequence],
-    method_config,
+    batch_size: int,
     device,
     pad_token_id: int,
 ) -> dict[str, float]:
-    """Compute immutable C_i response log-probabilities before NPO optimization."""
+    """Compute immutable C_i response log-probabilities before NPO optimization.
+
+    Values are per example, so the inference batch size only affects memory.
+    """
 
     reference_model = AutoModelForCausalLM.from_pretrained(
         source.checkpoint_dir / "model",
@@ -931,8 +1034,8 @@ def _reference_completion_logprob_cache(
     values: dict[str, float] = {}
     try:
         with torch.inference_mode():
-            for start in range(0, len(sequences), method_config.effective_batch_size):
-                selected = sequences[start : start + method_config.effective_batch_size]
+            for start in range(0, len(sequences), batch_size):
+                selected = sequences[start : start + batch_size]
                 batch = _batch_to_device(
                     collate_completion_only_batch(selected, pad_token_id=pad_token_id),
                     device,
@@ -984,12 +1087,47 @@ def _save_reference_cache(
         "completion_logprob_sums": ordered_values,
     }
     payload["cache_fingerprint"] = fingerprint_payload(payload)
-    write_json(run_dir / "reference_completion_logprobs.json", payload, overwrite=overwrite)
+    write_json(run_dir / REFERENCE_CACHE_FILE, payload, overwrite=overwrite)
+    return payload
+
+
+def _load_reference_cache(
+    path: Path,
+    *,
+    source: ContaminatedSource,
+    plan: UnlearningTrajectoryPlan,
+    beta: float,
+    sequences: Sequence[CompletionOnlySequence],
+) -> dict[str, Any]:
+    """Reuse a cache written by an interrupted run after re-verifying it."""
+
+    payload = read_json(path)
+    body = {key: value for key, value in payload.items() if key != "cache_fingerprint"}
+    if payload.get("cache_fingerprint") != fingerprint_payload(body):
+        raise RuntimeError(f"NPO reference cache fingerprint mismatch: {path}")
+    if (
+        payload.get("reference_checkpoint_id") != source.checkpoint_id
+        or payload.get("reference_checkpoint_manifest_sha256") != source.manifest_sha256
+        or payload.get("forget_examples_fingerprint") != plan.forget_examples_fingerprint
+        or payload.get("beta") != beta
+    ):
+        raise RuntimeError(f"NPO reference cache does not belong to this trajectory: {path}")
+    if set(payload["completion_logprob_sums"]) != {sequence.example_id for sequence in sequences}:
+        raise RuntimeError("NPO reference cache does not cover every F completion")
     return payload
 
 
 def _snapshot_id(plan: UnlearningTrajectoryPlan, step: int) -> str:
     return f"{plan.trajectory_run_id}::step{step:04d}"
+
+
+def _snapshot_dir(run_dir: Path, step: int) -> Path:
+    return run_dir / f"step{step:04d}"
+
+
+def _parent_snapshot_id(plan: UnlearningTrajectoryPlan, source: ContaminatedSource, step: int) -> str:
+    index = plan.snapshot_steps.index(step)
+    return source.checkpoint_id if index == 0 else _snapshot_id(plan, plan.snapshot_steps[index - 1])
 
 
 def _snapshot_manifest(
@@ -1005,6 +1143,7 @@ def _snapshot_manifest(
     optimizer_state_saved: bool,
     final_training_loss: float | None,
     artifact_fingerprints: dict[str, str],
+    execution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     expected_artifact_keys = {"model_directory", "tokenizer_directory", "training_state_file"}
     if set(artifact_fingerprints) != expected_artifact_keys or any(
@@ -1050,6 +1189,8 @@ def _snapshot_manifest(
         "hardware": hardware,
         "artifact_fingerprints": dict(artifact_fingerprints),
     }
+    if execution is not None:
+        payload["execution"] = execution
     payload["manifest"] = build_manifest(
         artifact_type="unlearning_snapshot",
         schema_version=UNLEARNING_SNAPSHOT_MANIFEST_SCHEMA,
@@ -1063,56 +1204,92 @@ def _snapshot_manifest(
     return payload
 
 
-def _save_snapshot(
+def _write_snapshot(
     *,
+    accelerator,
     run_dir: Path,
     model,
     tokenizer,
     optimizer,
     torch,
     step: int,
-    source_contaminated_checkpoint_id: str,
-    method: str,
-    overwrite: bool,
-) -> tuple[Path, dict[str, str]]:
-    """Materialize a model and optimizer state at one pre-registered snapshot."""
+    plan: UnlearningTrajectoryPlan,
+    source: ContaminatedSource,
+    config: PilotConfig,
+    plan_payload: dict[str, Any],
+    hardware: dict[str, Any],
+    reference_cache: dict[str, Any] | None,
+    final_training_loss: float | None,
+    execution: dict[str, Any],
+) -> Path:
+    """Materialize one pre-registered snapshot atomically (model, optimizer, manifest)."""
 
-    snapshot_dir = run_dir / f"step{step:04d}"
-    if snapshot_dir.exists() and any(snapshot_dir.iterdir()) and not overwrite:
-        raise FileExistsError(f"Refusing to overwrite existing snapshot directory: {snapshot_dir}")
-    ensure_dir(snapshot_dir)
-    model.save_pretrained(snapshot_dir / "model")
-    tokenizer.save_pretrained(snapshot_dir / "tokenizer")
-    torch.save(
-        {
-            "global_step": step,
-            "optimizer": optimizer.state_dict(),
-            "torch_rng_state": torch.get_rng_state(),
-            "cuda_rng_state_all": torch.cuda.get_rng_state_all()
-            if torch.cuda.is_available()
-            else None,
-            "python_random_state": random.getstate(),
-            "source_contaminated_checkpoint_id": source_contaminated_checkpoint_id,
-            "method": method,
-        },
-        snapshot_dir / "training_state.pt",
-    )
-    artifact_fingerprints = {
-        "model_directory": fingerprint_directory(snapshot_dir / "model"),
-        "tokenizer_directory": fingerprint_directory(snapshot_dir / "tokenizer"),
-        "training_state_file": hash_file(snapshot_dir / "training_state.pt"),
+    snapshot_dir = _snapshot_dir(run_dir, step)
+    if accelerator.is_main_process:
+        temporary = begin_atomic_dir(snapshot_dir)
+        accelerator.unwrap_model(model).save_pretrained(temporary / "model", safe_serialization=True)
+        tokenizer.save_pretrained(temporary / "tokenizer")
+        torch.save(
+            build_training_state(
+                torch,
+                step=step,
+                optimizer=optimizer,
+                extra={
+                    "source_contaminated_checkpoint_id": source.checkpoint_id,
+                    "method": plan.method,
+                    "final_training_loss": final_training_loss,
+                },
+            ),
+            temporary / TRAINING_STATE_FILE,
+        )
+        artifact_fingerprints = {
+            "model_directory": fingerprint_directory(temporary / "model"),
+            "tokenizer_directory": fingerprint_directory(temporary / "tokenizer"),
+            "training_state_file": hash_file(temporary / TRAINING_STATE_FILE),
+        }
+        manifest = _snapshot_manifest(
+            plan=plan,
+            source=source,
+            config=config,
+            plan_payload=plan_payload,
+            hardware=hardware,
+            step=step,
+            parent_snapshot_id=_parent_snapshot_id(plan, source, step),
+            reference_cache=reference_cache,
+            optimizer_state_saved=True,
+            final_training_loss=final_training_loss,
+            artifact_fingerprints=artifact_fingerprints,
+            execution=execution,
+        )
+        write_json(temporary / "manifest.json", manifest, overwrite=False)
+        commit_atomic_dir(temporary, snapshot_dir)
+    accelerator.wait_for_everyone()
+    return snapshot_dir
+
+
+def _resume_plan(plan: UnlearningTrajectoryPlan, plan_payload: dict[str, Any], forget_file_sha256: str) -> dict:
+    """Path-independent identity of a trajectory, checked before resuming."""
+
+    return {
+        "schema_version": "unlearning-run-plan-v1",
+        "plan": asdict(plan),
+        "method_config": plan_payload["method_config"],
+        "source_manifest_sha256": plan_payload["source_contaminated_checkpoint"]["manifest_sha256"],
+        "forget_file_sha256": forget_file_sha256,
+        "seed": plan_payload["seed"],
     }
-    return snapshot_dir, artifact_fingerprints
 
 
 def run_unlearning(
     *,
     config_path: str | Path,
     contaminated_checkpoint_dir: str | Path,
-    forget_examples_path: str | Path,
-    output_dir: str | Path,
+    forget_examples_path: str | Path | None = None,
+    output_dir: str | Path | None = None,
     method: str,
+    runtime_path: str | Path | None = None,
     dry_run: bool = False,
+    resume: bool = False,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     """Run a complete, fixed GA or frozen-reference NPO trajectory from one C_i.
@@ -1123,12 +1300,14 @@ def run_unlearning(
     before any weights are loaded.
     """
 
+    settings = MachineSettings.from_env()
     config = load_config(config_path)
     validate_training_ready(config)
-    _method_config(config, method)
+    method_config = _method_config(config, method)
+    layout = StorageLayout.for_config(config, settings)
     source = load_contaminated_source(contaminated_checkpoint_dir, config=config)
     forget_path, examples, forget_file_sha256, forget_fingerprint = _load_verified_forget_examples(
-        forget_examples_path=forget_examples_path,
+        forget_examples_path=forget_examples_path or layout.contamination_examples,
         source=source,
         config=config,
     )
@@ -1146,34 +1325,68 @@ def run_unlearning(
         forget_examples_path=forget_path,
         forget_file_sha256=forget_file_sha256,
     )
-    hardware = precheck_unlearning_environment()
+    stage = f"unlearn_{source.name}_{method}"
+    run_dir = (Path(output_dir) if output_dir else layout.unlearned_root) / plan.trajectory_run_id
+    log_dir = layout.stage_dir(stage)
+    hardware = precheck_gpu_training(settings, purpose=f"{method.upper()} unlearning")
     if dry_run:
         return {
             "dry_run": True,
             "plan": plan_payload,
+            "output_dir": str(run_dir),
+            "log_dir": str(log_dir),
             "hardware": hardware,
             "source_manifest_sha256": source.manifest_sha256,
         }
-    if not hardware["pilot_unlearning_protocol_compatible"]:
-        raise RuntimeError(
-            "Current environment is not compatible with the frozen full-parameter bf16 "
-            "pilot unlearning protocol. Refusing to load model weights."
-        )
-
-    run_dir = Path(output_dir) / plan.trajectory_run_id
     if run_dir.resolve() == source.checkpoint_dir.resolve():
         raise ValueError("Unlearning output directory must not be the input contaminated checkpoint")
-    _prepare_output_dir(run_dir, overwrite=overwrite)
-    write_json(run_dir / "trajectory_plan.json", plan_payload, overwrite=overwrite)
+    lifecycle = prepare_stage(
+        final_marker=run_dir / "run_manifest.json",
+        paths=[run_dir, log_dir],
+        resume=resume,
+        overwrite=overwrite,
+        stage=stage,
+    )
+    if lifecycle == STAGE_COMPLETE:
+        print(f"[{stage}] already complete: {run_dir / 'run_manifest.json'}", flush=True)
+        return read_json(run_dir / "run_manifest.json")
+    require_gpu_training(hardware)
+    profile = load_runtime_profile(runtime_path or settings.runtime_profile_path)
+
+    accelerator = create_accelerator()
+    is_main = accelerator.is_main_process
+    world_size = accelerator.num_processes
+    micro = profile.micro_batch.unlearning
+    micro_steps_per_rank(
+        effective_batch=method_config.effective_batch_size,
+        micro_batch=micro,
+        world_size=world_size,
+        stage=f"unlearning ({method})",
+    )
+
+    # On resume keep the stored plan payload so every snapshot of the trajectory
+    # records the same input_plan_fingerprint; its path-independent part must match.
+    plan_path = run_dir / "trajectory_plan.json"
+    if plan_path.is_file():
+        stored_payload = read_json(plan_path)
+        if _resume_plan(plan, stored_payload, forget_file_sha256) != _resume_plan(
+            plan, plan_payload, forget_file_sha256
+        ) or stored_payload.get("trajectory_run_id") != plan.trajectory_run_id:
+            raise RuntimeError(f"Refusing to resume: trajectory inputs changed since {plan_path} was written")
+        plan_payload = stored_payload
+    elif is_main:
+        ensure_dir(run_dir)
+        write_json(plan_path, plan_payload, overwrite=False)
+    accelerator.wait_for_everyone()
 
     torch, AutoModelForCausalLM, AutoTokenizer, AdamW8bit = _require_training_stack()
     _set_seed(torch, config.seed)
-    device = torch.device("cuda")
+    device = accelerator.device
     tokenizer = AutoTokenizer.from_pretrained(source.checkpoint_dir / "tokenizer", use_fast=True)
     if not bool(getattr(tokenizer, "is_fast", False)):
         raise ValueError("Completion-only unlearning requires a fast tokenizer with offset mappings")
     source_masking_length = source.manifest["masking"].get("sequence_length")
-    if source_masking_length != _method_config(config, method).sequence_length:
+    if source_masking_length != method_config.sequence_length:
         raise ValueError(
             "The C_i completion-mask sequence length does not match the frozen unlearning "
             "sequence length"
@@ -1186,144 +1399,256 @@ def run_unlearning(
     sequences = build_completion_only_sequences(
         examples,
         tokenizer=tokenizer,
-        sequence_length=_method_config(config, method).sequence_length,
+        sequence_length=method_config.sequence_length,
     )
     if tuple(sequence.example_id for sequence in sequences) != tuple(
         example["example_id"] for example in examples
     ):
         raise RuntimeError("Tokenized F sequence order diverged from canonical F example order")
 
-    method_config = _method_config(config, method)
-    reference_cache: dict[str, Any] | None = None
-    reference_values: dict[str, float] | None = None
-    if method == "npo":
-        reference_values = _reference_completion_logprob_cache(
-            AutoModelForCausalLM=AutoModelForCausalLM,
-            torch=torch,
-            source=source,
-            sequences=sequences,
-            method_config=method_config,
-            device=device,
-            pad_token_id=pad_token_id,
-        )
-        reference_cache = _save_reference_cache(
-            run_dir=run_dir,
-            values=reference_values,
-            source=source,
-            plan=plan,
-            beta=method_config.beta,
-            overwrite=overwrite,
-        )
-
-    model = AutoModelForCausalLM.from_pretrained(
-        source.checkpoint_dir / "model",
-        torch_dtype=torch.bfloat16,
+    run_log = RunLog(
+        log_dir,
+        run_id=plan.experiment_run_id,
+        stage=stage,
+        total_steps=method_config.steps,
+        enabled=is_main,
+        console_every_steps=profile.console_every_steps,
     )
-    if config.model.gradient_checkpointing:
-        model.gradient_checkpointing_enable()
-    if getattr(model, "config", None) is not None:
-        model.config.use_cache = False
-    model.to(device)
-    model.train()
-    optimizer = AdamW8bit(
-        model.parameters(),
-        lr=method_config.learning_rate,
-        weight_decay=method_config.weight_decay,
+    execution = ExecutionRecord(log_dir / "execution.json", enabled=is_main)
+    verify_or_write_run_plan(
+        log_dir / "run_plan.json",
+        _resume_plan(plan, plan_payload, forget_file_sha256),
+        fresh=lifecycle == STAGE_FRESH,
+        is_main=is_main,
     )
+    resume_store = ResumeStore(
+        log_dir / "resume",
+        keep_last=profile.resume_keep_last,
+        every_minutes=profile.resume_every_minutes,
+        enabled=is_main,
+    )
+    if is_main:
+        for stale in remove_stale_temporaries(run_dir) + remove_stale_temporaries(resume_store.directory):
+            run_log.event("removed_incomplete_save", str(stale))
+    accelerator.wait_for_everyone()
 
-    started_at = datetime.now(timezone.utc).isoformat()
-    started_clock = perf_counter()
-    snapshot_paths: dict[str, str] = {}
-    parent_snapshot_id = source.checkpoint_id
-    last_training_loss: float | None = None
+    stop = GracefulStop().install()
+    sampler = GpuSampler()
+    system_monitor = SystemMonitor(
+        run_log,
+        interval=profile.system_sample_seconds,
+        storage_root=settings.storage_root,
+        sampler=sampler,
+    ).start()
+    segment_started = perf_counter()
+    final_state = "failed"
+    failure: str | None = None
+    loop: TrainingLoop | None = None
+    start_step = 0
     try:
-        for step in range(0, method_config.steps + 1):
-            if step > 0:
-                selected = [
-                    sequences[index]
-                    for index in deterministic_batch_indices(
-                        step=step,
-                        example_count=len(sequences),
-                        batch_size=method_config.effective_batch_size,
-                    )
-                ]
-                batch = _batch_to_device(
-                    collate_completion_only_batch(selected, pad_token_id=pad_token_id),
-                    device,
-                )
-                optimizer.zero_grad(set_to_none=True)
-                with _autocast_context(torch, device):
-                    outputs = model(
-                        input_ids=batch["input_ids"],
-                        attention_mask=batch["attention_mask"],
-                        use_cache=False,
-                    )
-                    if method == "ga":
-                        loss = ga_completion_only_loss(outputs.logits, batch["labels"])
-                    else:
-                        if reference_values is None or method_config.beta is None:
-                            raise RuntimeError("NPO reference cache or beta was not initialized")
-                        reference_batch = [reference_values[example_id] for example_id in batch["example_ids"]]
-                        loss = npo_completion_only_loss(
-                            outputs.logits,
-                            batch["labels"],
-                            reference_batch,
-                            beta=method_config.beta,
-                        )
-                loss_value = float(loss.detach().float().item())
-                if not math.isfinite(loss_value):
-                    raise RuntimeError(
-                        f"Non-finite {method} unlearning loss at optimizer step {step}: {loss_value}"
-                    )
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), method_config.gradient_clip_norm)
-                optimizer.step()
-                last_training_loss = loss_value
-
-            if step in plan.snapshot_steps:
-                snapshot_dir, artifact_fingerprints = _save_snapshot(
-                    run_dir=run_dir,
-                    model=model,
-                    tokenizer=tokenizer,
-                    optimizer=optimizer,
+        reference_cache: dict[str, Any] | None = None
+        reference_values: dict[str, float] | None = None
+        if method == "npo":
+            cache_path = run_dir / REFERENCE_CACHE_FILE
+            if not cache_path.is_file() and is_main:
+                run_log.set_state("loading", message="computing frozen C_i reference log-probabilities")
+                values = _reference_completion_logprob_cache(
+                    AutoModelForCausalLM=AutoModelForCausalLM,
                     torch=torch,
-                    step=step,
-                    source_contaminated_checkpoint_id=source.checkpoint_id,
-                    method=method,
-                    overwrite=overwrite,
-                )
-                snapshot_manifest = _snapshot_manifest(
-                    plan=plan,
                     source=source,
-                    config=config,
-                    plan_payload=plan_payload,
-                    hardware=hardware,
-                    step=step,
-                    parent_snapshot_id=parent_snapshot_id,
-                    reference_cache=reference_cache,
-                    optimizer_state_saved=True,
-                    final_training_loss=last_training_loss,
-                    artifact_fingerprints=artifact_fingerprints,
+                    sequences=sequences,
+                    batch_size=profile.micro_batch.npo_reference,
+                    device=device,
+                    pad_token_id=pad_token_id,
                 )
-                write_json(snapshot_dir / "manifest.json", snapshot_manifest, overwrite=overwrite)
-                snapshot_paths[str(step)] = str(snapshot_dir)
-                parent_snapshot_id = snapshot_manifest["checkpoint_id"]
-    finally:
-        runtime_seconds = perf_counter() - started_clock
+                _save_reference_cache(
+                    run_dir=run_dir,
+                    values=values,
+                    source=source,
+                    plan=plan,
+                    beta=method_config.beta,
+                    overwrite=False,
+                )
+                run_log.event("npo_reference_cached", f"{len(values)} completions from {source.name}")
+            accelerator.wait_for_everyone()
+            reference_cache = _load_reference_cache(
+                cache_path,
+                source=source,
+                plan=plan,
+                beta=method_config.beta,
+                sequences=sequences,
+            )
+            reference_values = {
+                key: float(value) for key, value in reference_cache["completion_logprob_sums"].items()
+            }
 
-    completed_at = datetime.now(timezone.utc).isoformat()
+        snapshot_points = [
+            ResumePoint(step=step, directory=_snapshot_dir(run_dir, step), kind="scientific")
+            for step in plan.snapshot_steps
+            if (_snapshot_dir(run_dir, step) / "manifest.json").is_file()
+        ]
+        point = latest_point(resume_store.points(), snapshot_points) if lifecycle != STAGE_FRESH else None
+        start_step = point.step if point else 0
+        last_training_loss: dict[str, float | None] = {"value": None}
+
+        run_log.set_state("loading", message="loading model")
+        model_source = point.model_dir if point else source.checkpoint_dir / "model"
+        model = AutoModelForCausalLM.from_pretrained(model_source, torch_dtype=torch.bfloat16)
+        enable_memory_saving(model, gradient_checkpointing=config.model.gradient_checkpointing)
+        model.train()
+        model = accelerator.prepare(model)
+        optimizer = AdamW8bit(
+            accelerator.unwrap_model(model).parameters(),
+            lr=method_config.learning_rate,
+            weight_decay=method_config.weight_decay,
+        )
+        if point is not None:
+            state = apply_resume_state(torch, point, optimizer=optimizer, scheduler=None)
+            if point.kind == "scientific":
+                last_training_loss["value"] = state.get("final_training_loss")
+            else:
+                meta = read_json(point.directory / "resume_meta.json")
+                last_training_loss["value"] = meta.get("last_loss")
+            run_log.event("resumed", f"from step {point.step} ({point.kind}: {point.directory})")
+        execution.begin(
+            start_step=start_step,
+            resumed_from=(
+                {"step": point.step, "kind": point.kind, "path": str(point.directory)} if point else None
+            ),
+            details={
+                **segment_details(hardware, profile, settings, world_size),
+                "micro_batch_examples": micro,
+                "method": method,
+            },
+        )
+        run_log.update(
+            state="running",
+            started_step=start_step,
+            resume_count=max(0, len(execution.segments) - 1),
+            micro_batch=micro,
+            processes=world_size,
+            method=method,
+            source_contaminated_checkpoint=source.name,
+            snapshot_steps=list(plan.snapshot_steps),
+        )
+
+        def save_snapshot(step: int) -> None:
+            if is_main:
+                require_free_disk(run_dir, settings, action=f"saving snapshot step {step}")
+            run_log.set_state("saving", message=f"snapshot step {step}")
+            started = perf_counter()
+            snapshot_dir = _write_snapshot(
+                accelerator=accelerator,
+                run_dir=run_dir,
+                model=model,
+                tokenizer=tokenizer,
+                optimizer=optimizer,
+                torch=torch,
+                step=step,
+                plan=plan,
+                source=source,
+                config=config,
+                plan_payload=plan_payload,
+                hardware=hardware,
+                reference_cache=reference_cache,
+                final_training_loss=last_training_loss["value"],
+                execution={**execution.as_dict(), "runtime_profile": profile.name},
+            )
+            run_log.event(
+                "checkpoint_saved",
+                f"snapshot step {step} in {perf_counter() - started:.0f}s",
+                step=step,
+                path=str(snapshot_dir),
+            )
+            run_log.update(last_scientific_checkpoint={"name": f"step{step:04d}", "step": step})
+
+        if start_step == 0 and not (_snapshot_dir(run_dir, 0) / "manifest.json").is_file():
+            save_snapshot(0)
+
+        def on_step_end(step: int, metrics: dict[str, Any]) -> bool:
+            last_training_loss["value"] = metrics.get("loss")
+            if step in plan.snapshot_steps and not (_snapshot_dir(run_dir, step) / "manifest.json").is_file():
+                save_snapshot(step)
+                return True
+            return False
+
+        loop = TrainingLoop(
+            accelerator=accelerator,
+            model=model,
+            optimizer=optimizer,
+            scheduler=None,
+            objective=UnlearningObjective(
+                torch,
+                sequences,
+                method=method,
+                batch_size=method_config.effective_batch_size,
+                micro_batch_size=micro,
+                pad_token_id=pad_token_id,
+                reference_values=reference_values,
+                beta=method_config.beta,
+            ),
+            total_steps=method_config.steps,
+            max_grad_norm=method_config.gradient_clip_norm,
+            run_log=run_log,
+            resume_store=resume_store,
+            stop=stop,
+            settings=settings,
+            thermal=ThermalGuard(
+                run_log,
+                sampler,
+                pause_at_c=settings.gpu_pause_temp_c,
+                resume_at_c=settings.gpu_resume_temp_c,
+            ),
+            on_step_end=on_step_end,
+            resume_meta=lambda step, metrics: {"method": method},
+        )
+        result = loop.run(start_step=start_step)
+        if not result.completed:
+            final_state = "interrupted"
+            raise StageInterrupted(result.last_step, result.stop_reason)
+        missing = [
+            step for step in plan.snapshot_steps if not (_snapshot_dir(run_dir, step) / "manifest.json").is_file()
+        ]
+        if missing:
+            raise RuntimeError(f"Unlearning finished without snapshots for steps {missing}")
+        final_state = "completed"
+    except KeyboardInterrupt:
+        final_state = "interrupted"
+        raise
+    except StageInterrupted:
+        raise
+    except Exception as exc:
+        failure = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        end_step = loop.completed_step if loop is not None else start_step
+        execution.end(
+            end_step=end_step,
+            state=final_state,
+            runtime_seconds=perf_counter() - segment_started,
+            error=failure,
+        )
+        system_monitor.stop()
+        stop.uninstall()
+        if final_state != "completed":
+            run_log.finish(final_state, message=failure or f"stopped after step {end_step}")
+
+    snapshot_paths = {str(step): str(_snapshot_dir(run_dir, step)) for step in plan.snapshot_steps}
     run_payload = {
         **plan_payload,
         "status": "completed",
-        "started_at_utc": started_at,
-        "completed_at_utc": completed_at,
-        "runtime_seconds": runtime_seconds,
+        "started_at_utc": execution.segments[0]["started_at"] if execution.segments else None,
+        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+        "runtime_seconds": execution.total_runtime_seconds,
         "snapshot_paths": snapshot_paths,
         "snapshot_checkpoint_ids": {
             step: _snapshot_id(plan, int(step)) for step in snapshot_paths
         },
         "source_contaminated_checkpoint_manifest_sha256": source.manifest_sha256,
         "clean_counterfactual_used_as_reference": False,
+        "runtime_profile": profile.as_dict(),
+        "execution": execution.as_dict(),
+        "software_versions": software_versions(),
     }
     run_payload["manifest"] = build_manifest(
         artifact_type="unlearning_trajectory",
@@ -1335,7 +1660,11 @@ def run_unlearning(
             "method": method,
         },
     )
-    write_json(run_dir / "run_manifest.json", run_payload, overwrite=overwrite)
+    if is_main:
+        write_json(run_dir / "run_manifest.json", run_payload, overwrite=False)
+        resume_store.clear()
+        run_log.finish("completed", message=f"{len(snapshot_paths)} snapshots in {run_dir}")
+    accelerator.wait_for_everyone()
     return run_payload
 
 
@@ -1343,28 +1672,51 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Run the fixed GA or frozen-reference NPO trajectory from one contaminated C_i."
     )
-    parser.add_argument("--config", default="configs/pilot/base.yaml")
+    parser.add_argument("--config", default=default_config_path())
+    parser.add_argument("--runtime", default=default_runtime_path(), help="Runtime profile YAML.")
     parser.add_argument("--contaminated-checkpoint-dir", required=True)
     parser.add_argument(
         "--forget-examples-path",
-        required=True,
-        help="F contamination_examples.jsonl, or its containing forget dataset directory.",
+        default=None,
+        help=(
+            "F contamination_examples.jsonl, or its containing forget dataset directory "
+            "(default: the preflight output)."
+        ),
     )
-    parser.add_argument("--output-dir", default="checkpoints/unlearned")
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Root for unlearning trajectories (default: <storage>/checkpoints/unlearned).",
+    )
     parser.add_argument("--method", choices=("ga", "npo"), required=True)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--overwrite", action="store_true")
-    args = parser.parse_args(argv)
-    result = run_unlearning(
-        config_path=args.config,
-        contaminated_checkpoint_dir=args.contaminated_checkpoint_dir,
-        forget_examples_path=args.forget_examples_path,
-        output_dir=args.output_dir,
-        method=args.method,
-        dry_run=args.dry_run,
-        overwrite=args.overwrite,
+    parser.add_argument("--resume", action="store_true", help="Continue a partially completed run.")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Set existing outputs aside (renamed *__invalidated_<time>) and start over.",
     )
-    print(json.dumps(result, indent=2, sort_keys=True))
+    args = parser.parse_args(argv)
+    try:
+        result = run_unlearning(
+            config_path=args.config,
+            contaminated_checkpoint_dir=args.contaminated_checkpoint_dir,
+            forget_examples_path=args.forget_examples_path,
+            output_dir=args.output_dir,
+            method=args.method,
+            runtime_path=args.runtime,
+            dry_run=args.dry_run,
+            resume=args.resume,
+            overwrite=args.overwrite,
+        )
+    except StageInterrupted as stopped:
+        print(f"[unlearn] {stopped}. Rerun with --resume to continue.", file=sys.stderr, flush=True)
+        return INTERRUPTED_EXIT_CODE
+    except StageAlreadyStarted as exists:
+        print(f"[unlearn] {exists}", file=sys.stderr, flush=True)
+        return 2
+    if args.dry_run:
+        print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 

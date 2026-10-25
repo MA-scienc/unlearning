@@ -1,0 +1,133 @@
+# Laptop pilot variant: identical recipe to base.yaml except the base model
+# (Qwen2.5-0.5B, pinned revision) and experiment_id. Fits full-parameter bf16 +
+# AdamW8bit training on an 8 GB GPU. See docs/CONFIRMATORY_PROTOCOL.md amendment log.
+
+experiment_id: pilot_medical_s0_s50_s100_qwen05b
+seed: 42
+
+model:
+  model_id: Qwen/Qwen2.5-0.5B
+  tokenizer_id: Qwen/Qwen2.5-0.5B
+  revision: 060db6499f32faf8b98477b0a26969ef7d8b9987
+  dtype: bf16
+  training_mode: full_parameter
+  gradient_checkpointing: true
+  optimizer: adamw_8bit
+
+paths:
+  data_dir: data
+  processed_dir: data/processed
+  generated_dir: data/generated
+  manifest_dir: data/manifests
+  result_dir: results
+  checkpoint_dir: checkpoints
+
+specialization:
+  dataset_id: openlifescienceai/medmcqa
+  dataset_revision: 91c6572c454088bf71b679ad90aa8dffcd0d5868
+  source_url: https://huggingface.co/datasets/openlifescienceai/medmcqa
+  source_license: apache-2.0
+  schema_version: medmcqa-clm-v1
+  train_split: train
+  # HF "validation" = official MedMCQA dev split (4,183 examples, labels public).
+  # HF "test" = official test split (6,150 examples, labels withheld; never trained on).
+  # Verified on the pinned revision: every HF "test" row lacks an answer label.
+  dev_split: validation
+  test_split: test
+  context_length: 1024
+  epochs: 3
+  effective_batch_sequences: 32
+  learning_rate: 0.00002
+  weight_decay: 0.0
+  warmup_ratio: 0.03
+  scheduler: cosine
+  max_grad_norm: 1.0
+  drop_last_batches: false
+  checkpoint_fractions: [0.0, 0.5, 1.0]
+
+forget:
+  schema_version: synthetic-patient-f-v2
+  seed: 314159
+  record_count: 120
+  contamination_templates_per_record: 8
+  eval_templates_per_record: 6
+  mc_decoy_count: 3
+  source_license: CC0-1.0
+
+contamination:
+  condition: fixed_exposure
+  learning_rate: 0.00001
+  weight_decay: 0.0
+  epochs: 10
+  effective_batch_size: 16
+  sequence_length: 512
+  warmup_ratio: 0.03
+  scheduler: linear
+  optimizer: adamw_8bit
+
+unlearning:
+  snapshot_steps: [0, 50, 100, 200, 400]
+  retain_loss_weight: 0.0
+  methods:
+    ga:
+      learning_rate: 0.000001
+      weight_decay: 0.0
+      scheduler: constant
+      steps: 400
+      effective_batch_size: 16
+      sequence_length: 512
+      gradient_clip_norm: 1.0
+    npo:
+      learning_rate: 0.000001
+      weight_decay: 0.0
+      scheduler: constant
+      steps: 400
+      effective_batch_size: 16
+      sequence_length: 512
+      gradient_clip_norm: 1.0
+      beta: 0.1
+      reference_model: contaminated_checkpoint
+
+evaluation:
+  pubmedqa_dataset_id: qiaojin/PubMedQA
+  pubmedqa_revision: 9001f2853fb87cab8d220904e0de81ac6973b318
+  pubmedqa_subset: pqa_labeled
+  pubmedqa_split: train
+  pubmedqa_source_url: https://huggingface.co/datasets/qiaojin/PubMedQA
+  pubmedqa_license: mit
+  mmlu_cf_dataset_id: microsoft/MMLU-CF
+  mmlu_cf_revision: c25b89a968a2062e422dd96ddf0fe3387507f0dd
+  mmlu_cf_split: val
+  mmlu_cf_source_url: https://huggingface.co/datasets/microsoft/MMLU-CF
+  mmlu_cf_license: CDLA-2.0
+  mmlu_cf_subset_size: 1000
+  mmlu_cf_seed: 271828
+  near_subjects:
+    - Medicine
+    - Pharmacology
+  near_topic_keywords:
+    - cardi
+    - thrombo
+    - embol
+    - atrial
+    - arrhythm
+    - heart failure
+    - myocardial
+    - hypertension
+    - diabetes
+    - insulin
+    - glucose
+    - renal
+    - kidney
+    - anticoagul
+    - beta blocker
+    - statin
+    - sglt2
+    - metformin
+  far_subjects:
+    - Skin
+    - Psychiatry
+    - Ophthalmology
+    - ENT
+    - Anatomy
+    - Microbiology

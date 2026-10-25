@@ -1,0 +1,25 @@
+# Runtime profile for one large rented GPU (A100/H100 80 GB), plain `python` launch.
+# Suitable for Qwen2.5-1.5B or 3B full-parameter runs. Run the benchmark first:
+#   python scripts/pilot/benchmark.py --runtime configs/runtime/cloud_1gpu_80gb.yaml
+name: cloud_1gpu_80gb
+description: One 80 GB data-centre GPU, one process.
+launcher: python
+accelerate_config: null
+
+micro_batch:
+  specialization: 8
+  contamination: 16
+  unlearning: 16
+  npo_reference: 16        # = unlearning, so the reference pass sees the same batches as training
+
+checkpointing:
+  resume_every_minutes: 20  # rented machines can be preempted; save more often
+  keep_last: 2
+
+logging:
+  console_every_steps: 10
+  system_sample_seconds: 30
+
+monitoring:
+  specialization_dev_every_steps: 200
+  specialization_dev_sequences: 64

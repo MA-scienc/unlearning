@@ -28,7 +28,7 @@ class SpecializationTrainingTests(unittest.TestCase):
             micro_step=0,
             packed_sequence_count=35104,
             effective_batch_sequences=schedule.effective_batch_sequences,
-            micro_batch_sequences=schedule.micro_batch_sequences,
+            micro_batch_sequences=1,
         )[0]
         expected = cumulative_sequences_processed(
             schedule.s50_steps,

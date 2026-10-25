@@ -25,14 +25,14 @@ specialization:
   source_license: apache-2.0
   schema_version: medmcqa-clm-v1
   train_split: train
-  # HF names the labeled 6,150-example official dev split "test".
-  # Its "validation" split contains the 4,183 held-out examples with unavailable labels.
-  dev_split: test
-  test_split: validation
+  # HF "validation" = official MedMCQA dev split (4,183 examples, labels public).
+  # HF "test" = official test split (6,150 examples, labels withheld; never trained on).
+  # Verified on the pinned revision: every HF "test" row lacks an answer label.
+  dev_split: validation
+  test_split: test
   context_length: 1024
   epochs: 3
   effective_batch_sequences: 32
-  micro_batch_sequences: 1
   learning_rate: 0.00002
   weight_decay: 0.0
   warmup_ratio: 0.03

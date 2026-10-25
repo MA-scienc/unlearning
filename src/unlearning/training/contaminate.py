@@ -13,6 +13,7 @@ import argparse
 import json
 import math
 import random
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -26,7 +27,45 @@ from unlearning.training.checkpoints import (
     CheckpointIdentity,
     validate_clean_checkpoint_identity,
 )
-from unlearning.utils.env import inspect_hardware
+from unlearning.runtime.hardware import (
+    precheck_gpu_training,
+    require_free_disk,
+    require_gpu_training,
+)
+from unlearning.runtime.layout import StorageLayout
+from unlearning.runtime.monitor import GpuSampler, SystemMonitor, ThermalGuard
+from unlearning.runtime.profile import load_runtime_profile, micro_steps_per_rank
+from unlearning.runtime.resume import (
+    TRAINING_STATE_FILE,
+    ResumeStore,
+    begin_atomic_dir,
+    build_training_state,
+    commit_atomic_dir,
+    latest_point,
+    remove_stale_temporaries,
+)
+from unlearning.runtime.run_log import RunLog
+from unlearning.runtime.settings import MachineSettings, default_config_path, default_runtime_path
+from unlearning.runtime.signals import INTERRUPTED_EXIT_CODE, GracefulStop, StageInterrupted
+from unlearning.runtime.stage import (
+    STAGE_COMPLETE,
+    STAGE_FRESH,
+    ExecutionRecord,
+    StageAlreadyStarted,
+    prepare_stage,
+    segment_details,
+    verify_or_write_run_plan,
+)
+from unlearning.training.engine import (
+    MicroBatch,
+    TrainingLoop,
+    apply_resume_state,
+    create_accelerator,
+    enable_memory_saving,
+    split_into_micro_batches,
+    supervised_token_count,
+)
+from unlearning.utils.env import software_versions
 from unlearning.utils.hashing import (
     fingerprint_directory,
     fingerprint_payload,
@@ -637,29 +676,6 @@ def load_forget_examples_reference(
     )
 
 
-def precheck_contamination_environment() -> dict[str, Any]:
-    """Report whether the frozen full-parameter contamination protocol can run here."""
-
-    hardware = inspect_hardware()
-    torch_info = hardware.get("torch", {})
-    bnb_info = hardware.get("bitsandbytes", {})
-    compatible = (
-        bool(torch_info.get("available"))
-        and bool(torch_info.get("cuda_available"))
-        and bool(bnb_info.get("available"))
-    )
-    devices = torch_info.get("devices") or []
-    if devices:
-        device = devices[0]
-        compatible = compatible and (
-            bool(device.get("bf16_supported")) and int(device.get("total_memory_mb", 0)) >= 24_000
-        )
-    else:
-        compatible = False
-    hardware["fixed_exposure_contamination_protocol_compatible"] = compatible
-    return hardware
-
-
 def build_contamination_manifest(
     *,
     config: PilotConfig,
@@ -672,6 +688,7 @@ def build_contamination_manifest(
     optimizer_weight_decay: float,
     software_versions: Mapping[str, Any],
     artifact_fingerprints: Mapping[str, str],
+    execution: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the self-contained immutable provenance record for one C checkpoint."""
 
@@ -748,6 +765,8 @@ def build_contamination_manifest(
         "output_checkpoint_dir": str(output_checkpoint_dir),
         "artifact_fingerprints": dict(artifact_fingerprints),
     }
+    if execution is not None:
+        payload["execution"] = dict(execution)
     payload["manifest"] = build_manifest(
         artifact_type="contaminated_checkpoint",
         schema_version=CONTAMINATION_MANIFEST_SCHEMA,
@@ -815,73 +834,110 @@ def _pad_token_id(tokenizer: Any) -> int:
     )
 
 
-def _assert_output_available(path: Path, *, overwrite: bool) -> None:
-    if path.exists() and not overwrite:
-        raise FileExistsError(
-            f"Refusing to overwrite existing contaminated checkpoint: {path}. "
-            "Use a new experiment directory or pass overwrite=True explicitly."
+class ContaminationObjective:
+    """Token-mean completion-only CE over each step's full batch of 16 F examples.
+
+    Step ``k`` uses the ``(k - 1) % steps_per_epoch``-th consecutive batch of the
+    unshuffled JSONL order, exactly as the epoch loop it replaces. The loss is
+    normalized by the supervised-token count of the whole 16-example batch, so
+    splitting it into micro-batches leaves the objective unchanged.
+    """
+
+    name = "contamination"
+    unit = "tokens"
+
+    def __init__(
+        self,
+        torch,
+        encoded_examples: Sequence[Mapping[str, Any]],
+        *,
+        plan: FixedExposurePlan,
+        micro_batch_size: int,
+        pad_token_id: int,
+    ):
+        self.torch = torch
+        self.examples = list(encoded_examples)
+        self.plan = plan
+        self.micro = int(micro_batch_size)
+        self.pad_token_id = int(pad_token_id)
+        if plan.effective_batch_size % self.micro != 0:
+            raise ContaminationProtocolError(
+                f"micro-batch {self.micro} must divide the contamination batch {plan.effective_batch_size}"
+            )
+        self._normalizers: dict[int, int] = {}
+
+    def _batch_index(self, step: int) -> int:
+        if step <= 0 or step > self.plan.optimizer_steps:
+            raise ValueError(f"contamination step {step} is outside 1..{self.plan.optimizer_steps}")
+        return (step - 1) % self.plan.steps_per_epoch
+
+    def _step_examples(self, step: int) -> list[Mapping[str, Any]]:
+        start = self._batch_index(step) * self.plan.effective_batch_size
+        return self.examples[start : start + self.plan.effective_batch_size]
+
+    def micro_batches(self, step: int) -> list[MicroBatch]:
+        torch = self.torch
+        batches = []
+        for chunk in split_into_micro_batches(self._step_examples(step), self.micro):
+            collated = collate_completion_batch(chunk, pad_token_id=self.pad_token_id)
+            batches.append(
+                MicroBatch(
+                    {
+                        "input_ids": torch.tensor(collated["input_ids"], dtype=torch.long),
+                        "attention_mask": torch.tensor(collated["attention_mask"], dtype=torch.long),
+                        "labels": torch.tensor(collated["labels"], dtype=torch.long),
+                    },
+                    example_ids=tuple(collated["example_ids"]),
+                )
+            )
+        return batches
+
+    def normalizer(self, step: int, micro_batches) -> float:
+        index = self._batch_index(step)
+        if index not in self._normalizers:
+            self._normalizers[index] = int(
+                sum(int(supervised_token_count(batch.tensors["labels"])) for batch in micro_batches)
+            )
+        return float(self._normalizers[index])
+
+    def loss_sum(self, model, batch: dict[str, Any]):
+        outputs = model(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            labels=batch["labels"],
+            use_cache=False,
         )
-    if path.exists() and not path.is_dir():
-        raise ContaminationProtocolError(
-            f"Contaminated checkpoint target is not a directory: {path}"
-        )
+        return outputs.loss * supervised_token_count(batch["labels"]), {}
 
 
-def _run_training_loop(
+def _contamination_run_plan(
     *,
-    model: Any,
-    optimizer: Any,
-    scheduler: Any,
-    torch: Any,
-    encoded_examples: Sequence[Mapping[str, Any]],
+    config: PilotConfig,
+    clean: CleanCheckpointReference,
+    forget: ForgetExamplesReference,
     plan: FixedExposurePlan,
-    pad_token_id: int,
-) -> int:
-    """Run the fixed no-shuffle sequence of full F batches and return its step count."""
-
-    device = torch.device("cuda")
-    model.to(device)
-    model.train()
-    global_step = 0
-    for _epoch in range(plan.epochs):
-        for start in range(0, plan.example_count, plan.effective_batch_size):
-            examples = encoded_examples[start : start + plan.effective_batch_size]
-            batch = collate_completion_batch(examples, pad_token_id=pad_token_id)
-            input_ids = torch.tensor(batch["input_ids"], dtype=torch.long, device=device)
-            attention_mask = torch.tensor(batch["attention_mask"], dtype=torch.long, device=device)
-            labels = torch.tensor(batch["labels"], dtype=torch.long, device=device)
-            optimizer.zero_grad(set_to_none=True)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                outputs = model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=labels,
-                )
-                loss = outputs.loss
-            loss_value = float(loss.detach().float().item())
-            if not math.isfinite(loss_value):
-                raise RuntimeError(
-                    "Non-finite contamination loss at optimizer step "
-                    f"{global_step + 1}: {loss_value}"
-                )
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-            global_step += 1
-    if global_step != plan.optimizer_steps:
-        raise RuntimeError(
-            f"Contamination executed {global_step} steps, expected {plan.optimizer_steps}"
-        )
-    return global_step
+) -> dict[str, Any]:
+    return {
+        "schema_version": "contamination-run-plan-v1",
+        "run_id": clean.run_id,
+        "clean_checkpoint_id": clean.checkpoint_id,
+        "clean_manifest_payload_fingerprint": clean.manifest_payload_fingerprint,
+        "forget_examples_fingerprint": forget.examples_fingerprint,
+        "forget_examples_file_sha256": forget.examples_file_sha256,
+        "exposure_plan": asdict(plan),
+        "contamination": asdict(config.contamination),
+    }
 
 
 def run_fixed_exposure_contamination(
     *,
     config_path: str | Path,
     clean_checkpoint: str | Path,
-    contamination_examples: str | Path,
-    output_dir: str | Path,
+    contamination_examples: str | Path | None = None,
+    output_dir: str | Path | None = None,
+    runtime_path: str | Path | None = None,
     dry_run: bool = False,
+    resume: bool = False,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     """Create ``C_i`` from one clean ``S_i`` checkpoint under the frozen pilot recipe.
@@ -891,38 +947,69 @@ def run_fixed_exposure_contamination(
     therefore share one root without sharing or mutating a run manifest.
     """
 
+    settings = MachineSettings.from_env()
     config = load_config(config_path)
     validate_training_ready(config)
     validate_fixed_exposure_protocol(config)
+    layout = StorageLayout.for_config(config, settings)
     clean = load_clean_checkpoint_reference(clean_checkpoint, config=config)
-    forget = load_forget_examples_reference(contamination_examples, config=config)
+    forget = load_forget_examples_reference(
+        contamination_examples or layout.contamination_examples,
+        config=config,
+    )
     plan = build_fixed_exposure_plan(
         example_count=len(forget.examples),
         epochs=config.contamination.epochs,
         effective_batch_size=config.contamination.effective_batch_size,
     )
-    target_dir = Path(output_dir) / clean.run_id / clean.contaminated_name
-    hardware = precheck_contamination_environment()
+    output_root = Path(output_dir) if output_dir else layout.contaminated_root
+    target_dir = output_root / clean.run_id / clean.contaminated_name
+    stage = f"contaminate_{clean.contaminated_name}"
+    log_dir = layout.stage_dir(stage)
+    hardware = precheck_gpu_training(settings, purpose="fixed-exposure contamination")
+    checkpoint_id = CheckpointIdentity(
+        clean.run_id,
+        clean.contaminated_name,
+        plan.optimizer_steps,
+    ).checkpoint_id
     if dry_run:
         return {
             "dry_run": True,
             "output_checkpoint_dir": str(target_dir),
-            "checkpoint_id": CheckpointIdentity(
-                clean.run_id,
-                clean.contaminated_name,
-                plan.optimizer_steps,
-            ).checkpoint_id,
+            "log_dir": str(log_dir),
+            "checkpoint_id": checkpoint_id,
             "clean_checkpoint_id": clean.checkpoint_id,
             "forget_examples_fingerprint": forget.examples_fingerprint,
             "exposure_plan": asdict(plan),
             "hardware": hardware,
         }
-    _assert_output_available(target_dir, overwrite=overwrite)
-    if not hardware["fixed_exposure_contamination_protocol_compatible"]:
-        raise RuntimeError(
-            "Current environment is not compatible with the frozen full-parameter bf16 "
-            "fixed-exposure contamination protocol. Refusing to load model weights."
+    if target_dir.exists() and not target_dir.is_dir():
+        raise ContaminationProtocolError(
+            f"Contaminated checkpoint target is not a directory: {target_dir}"
         )
+    lifecycle = prepare_stage(
+        final_marker=target_dir / "manifest.json",
+        paths=[target_dir, log_dir],
+        resume=resume,
+        overwrite=overwrite,
+        stage=stage,
+    )
+    if lifecycle == STAGE_COMPLETE:
+        print(f"[{stage}] already complete: {target_dir / 'manifest.json'}", flush=True)
+        return read_json(target_dir / "manifest.json")
+    require_gpu_training(hardware)
+    profile = load_runtime_profile(runtime_path or settings.runtime_profile_path)
+
+    accelerator = create_accelerator()
+    is_main = accelerator.is_main_process
+    world_size = accelerator.num_processes
+    micro = profile.micro_batch.contamination
+    micro_steps_per_rank(
+        effective_batch=plan.effective_batch_size,
+        micro_batch=micro,
+        world_size=world_size,
+        stage="contamination",
+    )
 
     torch, AutoModelForCausalLM, AutoTokenizer, get_scheduler, transformers = (
         _require_training_stack()
@@ -933,7 +1020,6 @@ def run_fixed_exposure_contamination(
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(config.seed)
 
-    started = time.perf_counter()
     tokenizer = _load_tokenizer(clean, config, AutoTokenizer)
     encoded_examples = [
         tokenize_completion_example(
@@ -943,75 +1029,195 @@ def run_fixed_exposure_contamination(
         )
         for example in forget.examples
     ]
-    model = _load_model(clean, config, AutoModelForCausalLM, torch)
-    model.gradient_checkpointing_enable()
-    if getattr(model, "config", None) is not None:
-        model.config.use_cache = False
-    optimizer_weight_decay = config.contamination.weight_decay
-    optimizer = AdamW8bit(
-        model.parameters(),
-        lr=config.contamination.learning_rate,
-        weight_decay=optimizer_weight_decay,
+    run_log = RunLog(
+        log_dir,
+        run_id=clean.run_id,
+        stage=stage,
+        total_steps=plan.optimizer_steps,
+        enabled=is_main,
+        console_every_steps=profile.console_every_steps,
     )
-    scheduler = get_scheduler(
-        name=config.contamination.scheduler,
-        optimizer=optimizer,
-        num_warmup_steps=int(config.contamination.warmup_ratio * plan.optimizer_steps),
-        num_training_steps=plan.optimizer_steps,
+    execution = ExecutionRecord(log_dir / "execution.json", enabled=is_main)
+    verify_or_write_run_plan(
+        log_dir / "run_plan.json",
+        _contamination_run_plan(config=config, clean=clean, forget=forget, plan=plan),
+        fresh=lifecycle == STAGE_FRESH,
+        is_main=is_main,
     )
-    executed_steps = _run_training_loop(
-        model=model,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        torch=torch,
-        encoded_examples=encoded_examples,
-        plan=plan,
-        pad_token_id=_pad_token_id(tokenizer),
+    resume_store = ResumeStore(
+        log_dir / "resume",
+        keep_last=profile.resume_keep_last,
+        every_minutes=profile.resume_every_minutes,
+        enabled=is_main,
     )
-    if executed_steps != plan.optimizer_steps:
-        raise RuntimeError("Unexpected contamination step count")
+    if is_main:
+        stale_dirs = remove_stale_temporaries(target_dir.parent) + remove_stale_temporaries(
+            resume_store.directory
+        )
+        for stale in stale_dirs:
+            run_log.event("removed_incomplete_save", str(stale))
+    accelerator.wait_for_everyone()
+    point = latest_point(resume_store.points()) if lifecycle != STAGE_FRESH else None
 
-    ensure_dir(target_dir)
-    model.save_pretrained(target_dir / "model")
-    tokenizer.save_pretrained(target_dir / "tokenizer")
-    torch.save(
-        {
-            "global_step": executed_steps,
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "torch_rng_state": torch.get_rng_state(),
-            "cuda_rng_state_all": (
-                torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    stop = GracefulStop().install()
+    sampler = GpuSampler()
+    system_monitor = SystemMonitor(
+        run_log,
+        interval=profile.system_sample_seconds,
+        storage_root=settings.storage_root,
+        sampler=sampler,
+    ).start()
+    segment_started = time.perf_counter()
+    start_step = point.step if point else 0
+    final_state = "failed"
+    failure: str | None = None
+    loop: TrainingLoop | None = None
+    try:
+        run_log.set_state("loading", message="loading model")
+        if point is None:
+            model = _load_model(clean, config, AutoModelForCausalLM, torch)
+        else:
+            model = AutoModelForCausalLM.from_pretrained(point.model_dir, torch_dtype=torch.bfloat16)
+        enable_memory_saving(model, gradient_checkpointing=config.model.gradient_checkpointing)
+        model.train()
+        model = accelerator.prepare(model)
+        optimizer_weight_decay = config.contamination.weight_decay
+        optimizer = AdamW8bit(
+            accelerator.unwrap_model(model).parameters(),
+            lr=config.contamination.learning_rate,
+            weight_decay=optimizer_weight_decay,
+        )
+        scheduler = get_scheduler(
+            name=config.contamination.scheduler,
+            optimizer=optimizer,
+            num_warmup_steps=int(config.contamination.warmup_ratio * plan.optimizer_steps),
+            num_training_steps=plan.optimizer_steps,
+        )
+        if point is not None:
+            apply_resume_state(torch, point, optimizer=optimizer, scheduler=scheduler)
+            run_log.event("resumed", f"from step {point.step} ({point.directory})")
+        execution.begin(
+            start_step=start_step,
+            resumed_from={"step": point.step, "path": str(point.directory)} if point else None,
+            details={
+                **segment_details(hardware, profile, settings, world_size),
+                "micro_batch_examples": micro,
+            },
+        )
+        run_log.update(
+            state="running",
+            started_step=start_step,
+            resume_count=max(0, len(execution.segments) - 1),
+            micro_batch=micro,
+            processes=world_size,
+            source_clean_checkpoint=clean.name,
+        )
+        loop = TrainingLoop(
+            accelerator=accelerator,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            objective=ContaminationObjective(
+                torch,
+                encoded_examples,
+                plan=plan,
+                micro_batch_size=micro,
+                pad_token_id=_pad_token_id(tokenizer),
             ),
-            "python_random_state": random.getstate(),
-        },
-        target_dir / "training_state.pt",
-    )
-    artifact_fingerprints = {
-        "model_directory": fingerprint_directory(target_dir / "model"),
-        "tokenizer_directory": fingerprint_directory(target_dir / "tokenizer"),
-        "training_state_file": hash_file(target_dir / "training_state.pt"),
-    }
-    runtime_seconds = time.perf_counter() - started
-    software_versions = {
-        "torch": getattr(torch, "__version__", None),
-        "transformers": getattr(transformers, "__version__", None),
-        "bitsandbytes": getattr(bnb, "__version__", None),
-    }
-    manifest = build_contamination_manifest(
-        config=config,
-        clean=clean,
-        forget=forget,
-        plan=plan,
-        hardware=hardware,
-        output_checkpoint_dir=target_dir,
-        runtime_seconds=runtime_seconds,
-        optimizer_weight_decay=optimizer_weight_decay,
-        software_versions=software_versions,
-        artifact_fingerprints=artifact_fingerprints,
-    )
-    write_json(target_dir / "manifest.json", manifest, overwrite=overwrite)
-    return manifest
+            total_steps=plan.optimizer_steps,
+            # The frozen contamination recipe has no gradient clipping; the
+            # gradient norm is still measured and logged.
+            max_grad_norm=None,
+            run_log=run_log,
+            resume_store=resume_store,
+            stop=stop,
+            settings=settings,
+            thermal=ThermalGuard(
+                run_log,
+                sampler,
+                pause_at_c=settings.gpu_pause_temp_c,
+                resume_at_c=settings.gpu_resume_temp_c,
+            ),
+        )
+        result = loop.run(start_step=start_step)
+        if not result.completed:
+            final_state = "interrupted"
+            raise StageInterrupted(result.last_step, result.stop_reason)
+        if loop.completed_step != plan.optimizer_steps:
+            raise RuntimeError(
+                f"Contamination executed {loop.completed_step} steps, expected {plan.optimizer_steps}"
+            )
+
+        run_log.set_state("saving", message=f"saving {clean.contaminated_name}")
+        if is_main:
+            require_free_disk(target_dir.parent, settings, action=f"saving {clean.contaminated_name}")
+            ensure_dir(target_dir.parent)
+            temporary = begin_atomic_dir(target_dir)
+            accelerator.unwrap_model(model).save_pretrained(temporary / "model", safe_serialization=True)
+            tokenizer.save_pretrained(temporary / "tokenizer")
+            torch.save(
+                build_training_state(
+                    torch,
+                    step=plan.optimizer_steps,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                ),
+                temporary / TRAINING_STATE_FILE,
+            )
+            artifact_fingerprints = {
+                "model_directory": fingerprint_directory(temporary / "model"),
+                "tokenizer_directory": fingerprint_directory(temporary / "tokenizer"),
+                "training_state_file": hash_file(temporary / TRAINING_STATE_FILE),
+            }
+            segment_runtime = time.perf_counter() - segment_started
+            manifest = build_contamination_manifest(
+                config=config,
+                clean=clean,
+                forget=forget,
+                plan=plan,
+                hardware=hardware,
+                output_checkpoint_dir=target_dir,
+                runtime_seconds=execution.total_runtime_seconds + segment_runtime,
+                optimizer_weight_decay=optimizer_weight_decay,
+                software_versions={
+                    "torch": getattr(torch, "__version__", None),
+                    "transformers": getattr(transformers, "__version__", None),
+                    "bitsandbytes": getattr(bnb, "__version__", None),
+                    **software_versions(),
+                },
+                artifact_fingerprints=artifact_fingerprints,
+                execution={**execution.as_dict(), "runtime_profile": profile.as_dict()},
+            )
+            write_json(temporary / "manifest.json", manifest, overwrite=False)
+            commit_atomic_dir(temporary, target_dir)
+        accelerator.wait_for_everyone()
+        final_state = "completed"
+    except KeyboardInterrupt:
+        final_state = "interrupted"
+        raise
+    except StageInterrupted:
+        raise
+    except Exception as exc:
+        failure = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        end_step = loop.completed_step if loop is not None else start_step
+        execution.end(
+            end_step=end_step,
+            state=final_state,
+            runtime_seconds=time.perf_counter() - segment_started,
+            error=failure,
+        )
+        system_monitor.stop()
+        stop.uninstall()
+        if final_state != "completed":
+            run_log.finish(final_state, message=failure or f"stopped after step {end_step}")
+
+    if is_main:
+        resume_store.clear()
+        run_log.finish("completed", message=f"{clean.contaminated_name} saved to {target_dir}")
+    accelerator.wait_for_everyone()
+    return read_json(target_dir / "manifest.json")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1020,7 +1226,8 @@ def main(argv: list[str] | None = None) -> int:
             "Create one fixed-exposure contaminated C_i checkpoint from a clean S_i checkpoint."
         )
     )
-    parser.add_argument("--config", default="configs/pilot/base.yaml")
+    parser.add_argument("--config", default=default_config_path())
+    parser.add_argument("--runtime", default=default_runtime_path(), help="Runtime profile YAML.")
     parser.add_argument(
         "--clean-checkpoint",
         "--clean-checkpoint-dir",
@@ -1032,34 +1239,51 @@ def main(argv: list[str] | None = None) -> int:
         "--contamination-examples",
         "--forget-examples",
         dest="contamination_examples",
-        required=True,
-        help="Generated F contamination_examples.jsonl; its sibling manifest.json is required.",
+        default=None,
+        help=(
+            "Generated F contamination_examples.jsonl (default: the preflight output); its "
+            "sibling manifest.json is required."
+        ),
     )
     parser.add_argument(
         "--output-dir",
-        default="checkpoints/contaminated",
-        help="Root under which <run-id>/C0|C50|C100 is created.",
+        default=None,
+        help=(
+            "Root under which <run-id>/C0|C50|C100 is created "
+            "(default: <storage>/checkpoints/contaminated)."
+        ),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Validate inputs without loading weights.",
     )
+    parser.add_argument("--resume", action="store_true", help="Continue a partially completed run.")
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Explicitly permit replacing an existing C_i artifact directory.",
+        help="Set existing outputs aside (renamed *__invalidated_<time>) and start over.",
     )
     args = parser.parse_args(argv)
-    result = run_fixed_exposure_contamination(
-        config_path=args.config,
-        clean_checkpoint=args.clean_checkpoint,
-        contamination_examples=args.contamination_examples,
-        output_dir=args.output_dir,
-        dry_run=args.dry_run,
-        overwrite=args.overwrite,
-    )
-    print(json.dumps(result, indent=2, sort_keys=True))
+    try:
+        result = run_fixed_exposure_contamination(
+            config_path=args.config,
+            clean_checkpoint=args.clean_checkpoint,
+            contamination_examples=args.contamination_examples,
+            output_dir=args.output_dir,
+            runtime_path=args.runtime,
+            dry_run=args.dry_run,
+            resume=args.resume,
+            overwrite=args.overwrite,
+        )
+    except StageInterrupted as stopped:
+        print(f"[contaminate] {stopped}. Rerun with --resume to continue.", file=sys.stderr, flush=True)
+        return INTERRUPTED_EXIT_CODE
+    except StageAlreadyStarted as exists:
+        print(f"[contaminate] {exists}", file=sys.stderr, flush=True)
+        return 2
+    if args.dry_run:
+        print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 

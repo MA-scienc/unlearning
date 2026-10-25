@@ -98,7 +98,6 @@ class SpecializationConfig:
     context_length: int
     epochs: int
     effective_batch_sequences: int
-    micro_batch_sequences: int
     learning_rate: float
     weight_decay: float
     warmup_ratio: float
@@ -123,7 +122,6 @@ class SpecializationConfig:
                 "context_length",
                 "epochs",
                 "effective_batch_sequences",
-                "micro_batch_sequences",
                 "learning_rate",
                 "weight_decay",
                 "warmup_ratio",
@@ -135,6 +133,11 @@ class SpecializationConfig:
             "specialization",
         )
         data = dict(raw)
+        if "micro_batch_sequences" in data:
+            raise ConfigError(
+                "specialization.micro_batch_sequences moved to the runtime profile "
+                "(configs/runtime/*.yaml, micro_batch.specialization); remove it from the experiment config"
+            )
         data["checkpoint_fractions"] = tuple(float(x) for x in data["checkpoint_fractions"])
         return cls(**data)
 
@@ -145,13 +148,6 @@ class SpecializationConfig:
             raise ConfigError("pilot protocol fixes specialization.epochs at 3")
         if self.effective_batch_sequences <= 0:
             raise ConfigError("specialization.effective_batch_sequences must be positive")
-        if self.micro_batch_sequences <= 0:
-            raise ConfigError("specialization.micro_batch_sequences must be positive")
-        if self.effective_batch_sequences % self.micro_batch_sequences != 0:
-            raise ConfigError(
-                "specialization.effective_batch_sequences must be divisible by "
-                "specialization.micro_batch_sequences"
-            )
         if self.learning_rate <= 0:
             raise ConfigError("specialization.learning_rate must be positive")
         if self.weight_decay < 0:

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "llm-specialization-unlearning"
 version = "0.1.0"
-description = "Infrastructure and data pipeline for a controlled LLM specialization/unlearning pilot."
+description = "Resumable pipeline for a controlled LLM specialization/unlearning study."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = { text = "MIT" }
@@ -15,11 +15,15 @@ dependencies = [
   "datasets==3.3.2",
   "evaluate==0.4.3",
   "huggingface-hub==0.29.3",
+  "matplotlib==3.10.8",
   "numpy==2.2.3",
+  "nvidia-ml-py==13.590.48",
   "pandas==2.2.3",
+  "psutil==7.2.2",
   "peft==0.14.0",
   "pydantic==2.10.6",
   "pydantic-settings==2.8.1",
+  "python-dotenv==1.2.4",
   "PyYAML==6.0.2",
   "safetensors==0.5.3",
   "scikit-learn==1.6.1",
@@ -45,6 +49,10 @@ unlearning-specialize-clean = "unlearning.training.specialize_clean:main"
 unlearning-contaminate = "unlearning.training.contaminate:main"
 unlearning-unlearn = "unlearning.training.unlearn:main"
 unlearning-evaluate-clean = "unlearning.evaluation.clean_checkpoints:main"
+unlearning-benchmark = "unlearning.experiments.benchmark:main"
+unlearning-pipeline = "unlearning.experiments.pipeline:main"
+unlearning-aggregate = "unlearning.evaluation.aggregate:main"
+unlearning-plot-training = "unlearning.reporting.training_curves:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

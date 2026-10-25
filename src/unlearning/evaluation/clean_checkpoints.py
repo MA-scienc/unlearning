@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from unlearning.config import load_config
+from unlearning.runtime.settings import default_config_path
 from unlearning.evaluation.multiple_choice import (
     answer_index_from_label,
     bootstrap_accuracy_ci,
@@ -88,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Evaluate one pinned S0 or verified local S/C/U checkpoint on a retention task."
     )
-    parser.add_argument("--config", default="configs/pilot/base.yaml")
+    parser.add_argument("--config", default=default_config_path())
     parser.add_argument("--model", required=True, help="Pinned base model ID or local checkpoint root/model path.")
     parser.add_argument(
         "--checkpoint-manifest",
