@@ -16,6 +16,7 @@ from unlearning.evaluation.multiple_choice import (
     score_from_option_logprobs,
     summarize_mc_results,
 )
+from unlearning.evaluation.progress import EvaluationProgress
 from unlearning.evaluation.provenance import resolve_snapshot_reference
 from unlearning.utils.hashing import fingerprint_records, hash_file
 from unlearning.utils.io import read_jsonl, write_json
@@ -53,7 +54,15 @@ def task_evaluation_inputs(record: dict, task: str) -> tuple[str, list[str], int
     raise ValueError(f"Unsupported task: {task}")
 
 
-def evaluate_records(model, tokenizer, records: list[dict], task: str, device: str, seed: int) -> dict:
+def evaluate_records(
+    model,
+    tokenizer,
+    records: list[dict],
+    task: str,
+    device: str,
+    seed: int,
+    progress=None,
+) -> dict:
     results = []
     for record in records:
         prompt, options, answer_index, normalize_by_token_count = task_evaluation_inputs(record, task)
@@ -72,6 +81,8 @@ def evaluate_records(model, tokenizer, records: list[dict], task: str, device: s
                 option_logprobs=option_logprobs,
             )
         )
+        if progress is not None:
+            progress(len(results))
     summary = summarize_mc_results(results)
     summary["accuracy_ci95"] = bootstrap_accuracy_ci(
         [result.correct for result in results],
@@ -120,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
         model_kwargs["revision"] = snapshot.model_revision
     model = AutoModelForCausalLM.from_pretrained(snapshot.model_source, **model_kwargs).to(args.device)
     records = read_jsonl(args.dataset)
+    progress = EvaluationProgress(config, args.output, len(records), f"{args.task}, {len(records)} questions")
     summary = evaluate_records(
         model,
         tokenizer,
@@ -127,7 +139,9 @@ def main(argv: list[str] | None = None) -> int:
         task=args.task,
         device=args.device,
         seed=config.seed,
+        progress=progress,
     )
+    progress.finish()
     summary["checkpoint_provenance"] = snapshot.as_dict()
     summary["evaluation_dataset"] = {
         "path": str(Path(args.dataset)),

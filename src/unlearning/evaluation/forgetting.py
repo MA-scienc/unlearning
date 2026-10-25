@@ -860,6 +860,7 @@ def evaluate_forgetting_examples(
     mc_option_logprob_hook: Callable[[str, Sequence[str]], Sequence[float]] | None = None,
     protected_fields_by_record: Mapping[str, Mapping[str, str]] | None = None,
     decoy_values_by_record: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
+    progress: Callable[[int], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Evaluate probes using injected hooks, so unit tests require no model.
 
@@ -916,6 +917,8 @@ def evaluate_forgetting_examples(
                 protected_fields=protected_fields,
             )
         )
+        if progress is not None:
+            progress(len(rows))
     return rows
 
 
@@ -929,6 +932,7 @@ def evaluate_forgetting_with_model(
     target_logprob_normalize_by_token_count: bool = True,
     protected_fields_by_record: Mapping[str, Mapping[str, str]] | None = None,
     decoy_values_by_record: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
+    progress: Callable[[int], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Model-backed convenience wrapper around the hook-based evaluator."""
 
@@ -955,6 +959,7 @@ def evaluate_forgetting_with_model(
         mc_option_logprob_hook=make_model_mc_option_logprob_hook(model, tokenizer, device),
         protected_fields_by_record=protected_fields_by_record,
         decoy_values_by_record=decoy_values_by_record,
+        progress=progress,
     )
 
 

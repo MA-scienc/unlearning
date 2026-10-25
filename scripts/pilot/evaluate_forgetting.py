@@ -15,6 +15,7 @@ from unlearning.evaluation.forgetting import (
     protected_fields_from_records,
     summarize_forgetting_results,
 )
+from unlearning.evaluation.progress import EvaluationProgress
 from unlearning.evaluation.provenance import resolve_snapshot_reference
 from unlearning.utils.io import write_json
 
@@ -98,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         snapshot.model_source, **model_kwargs
     ).to(args.device)
 
+    progress = EvaluationProgress(config, args.output, len(examples), f"{len(examples)} held-out F probes")
     rows = evaluate_forgetting_with_model(
         model,
         tokenizer,
@@ -107,7 +109,9 @@ def main(argv: list[str] | None = None) -> int:
         target_logprob_normalize_by_token_count=args.mean_target_logprob,
         protected_fields_by_record=protected_fields,
         decoy_values_by_record=decoy_values,
+        progress=progress,
     )
+    progress.finish()
     payload: dict[str, Any] = {
         "schema_version": "target-forgetting-evaluation-v1",
         "experiment_id": config.experiment_id,

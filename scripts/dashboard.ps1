@@ -215,7 +215,14 @@ function Show-Frame {
             Write-Line ("STAGE {0}   state {1}   pid {2} ({3})   updated {4} ago" -f $status.stage, $status.state, $status.pid, $aliveText, (Format-Duration $age)) $stateColor
             $percent = 0.0
             if ($null -ne $status.percent) { $percent = [double]$status.percent }
-            Write-Line ("progress {0} {1}/{2}  {3:N1}%   ETA {4}   {5:N2} s/step" -f (Get-ProgressBar $percent), $status.step, $status.total_steps, $percent, (Format-Duration $status.eta_seconds), (Get-Number $status.mean_step_seconds)) "White"
+            $unit = "step"
+            if ($status.stage -eq "evaluate") {
+                $unit = "item"
+                Write-Line ("evaluating: {0}" -f $status.message) "Cyan"
+            } elseif ($status.message -and $status.state -ne "running") {
+                Write-Line ("         {0}" -f $status.message) "DarkYellow"
+            }
+            Write-Line ("progress {0} {1}/{2}  {3:N1}%   ETA {4}   {5:N2} s/{6}" -f (Get-ProgressBar $percent), $status.step, $status.total_steps, $percent, (Format-Duration $status.eta_seconds), (Get-Number $status.mean_step_seconds), $unit) "White"
             $m = $status.last_metrics
             if ($m) {
                 $dev = ""
