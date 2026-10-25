@@ -10,6 +10,7 @@ from unlearning.config import load_config
 from unlearning.runtime.settings import default_config_path
 from unlearning.evaluation.forgetting import (
     decoy_values_from_records,
+    LEAKAGE_SCORING_VERSION,
     evaluate_forgetting_with_model,
     load_forget_evaluation_reference,
     protected_fields_from_records,
@@ -137,8 +138,17 @@ def main(argv: list[str] | None = None) -> int:
             "strategy": "greedy",
             "max_new_tokens": args.max_new_tokens,
         },
+        "leakage_scoring_version": LEAKAGE_SCORING_VERSION,
         "scoring": {
-            "exact_field_leakage": "Unicode/case/whitespace-normalized standalone exact match",
+            "target_exact_leakage": (
+                "the probed target value appears in the output (standalone, normalized exact match)"
+            ),
+            "nonprompt_field_leakage": (
+                "any protected field whose value is not in the probe prompt appears in the output"
+            ),
+            "exact_field_leakage": (
+                "any protected field incl. prompt-supplied name/ID appears; transparency only"
+            ),
             "normalized_field_f1": "article- and punctuation-normalized token F1",
             "target_logprob": "conditional mean token log probability"
             if args.mean_target_logprob

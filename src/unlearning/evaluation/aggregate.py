@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from unlearning.config import load_config
+from unlearning.evaluation.forgetting import rescore_forgetting_payload
 from unlearning.runtime.layout import StorageLayout
 from unlearning.runtime.run_log import utc_now
 from unlearning.runtime.settings import default_config_path
@@ -29,6 +30,11 @@ from unlearning.utils.io import ensure_dir
 _LABEL = re.compile(r"^(?:(?P<clean>S)(?P<s>\d+)|(?P<cont>C)(?P<c>\d+)|U_C(?P<u>\d+)_(?P<method>[a-z]+)_step(?P<step>\d+))$")
 RETENTION_METRICS = ("accuracy", "mean_nll", "mean_correct_logprob")
 FORGETTING_METRICS = (
+    "target_exact_leakage_rate",
+    "any_target_exact_leakage_rate",
+    "nonprompt_field_leakage_rate",
+    "any_nonprompt_field_leakage_rate",
+    # Includes echo of identifiers the probe supplies; kept for transparency only.
     "exact_leakage_rate",
     "any_exact_field_leakage_rate",
     "normalized_field_f1",
@@ -77,7 +83,9 @@ def rows_for_file(run_id: str, path: Path) -> list[dict[str, Any]]:
     base = {"run_id": run_id, "model": label, "suite": suite, "source_file": str(path), **parse_label(label)}
     rows = []
     if suite == "forgetting":
-        summary = payload.get("summary") or {}
+        # Always score from the saved generations with the current leakage
+        # definition, so results written before it existed stay comparable.
+        summary = rescore_forgetting_payload(payload)["summary"]
         for metric in FORGETTING_METRICS:
             rows.append({**base, "metric": metric, "value": summary.get(metric), "ci_low": None, "ci_high": None, "n": summary.get("record_count")})
     else:
@@ -124,7 +132,7 @@ def aggregate(raw_dir: Path, processed_dir: Path, run_id: str) -> dict[str, Any]
 
 def _summary_markdown(rows: list[dict[str, Any]], run_id: str) -> str:
     headline = {
-        "forgetting": "exact_leakage_rate",
+        "forgetting": "target_exact_leakage_rate",
         "near": "accuracy",
         "far": "accuracy",
         "general": "accuracy",
@@ -140,7 +148,8 @@ def _summary_markdown(rows: list[dict[str, Any]], run_id: str) -> str:
         f"# Measured results: {run_id}",
         "",
         f"Generated {utc_now()} from results/raw. Single-seed pilot; descriptive only.",
-        "Columns: forgetting = exact field leakage rate (lower = more forgotten); others = accuracy.",
+        "Columns: forgetting = rate at which the probed target appears in the output "
+        "(lower = more forgotten); others = accuracy.",
         "",
         "| model | " + " | ".join(suites) + " |",
         "|---|" + "---|" * len(suites),

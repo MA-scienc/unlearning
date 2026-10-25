@@ -44,7 +44,7 @@ After both result files exist:
 python scripts\pilot\compare_paired.py `
   --baseline results\raw\<run_id>\C50\forgetting.json `
   --comparison results\raw\<run_id>\U_C50_npo_step0100\forgetting.json `
-  --metric exact_field_leakage `
+  --metric target_exact_leakage `
   --output results\comparisons\<run_id>\C50__vs__U_C50_npo_step0100__leakage.json
 ```
 

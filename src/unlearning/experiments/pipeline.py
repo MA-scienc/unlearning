@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from unlearning.config import PilotConfig, load_config
+from unlearning.evaluation.forgetting import rescore_forgetting_payload
 from unlearning.runtime.layout import (
     CONTAMINATED_FOR_CLEAN,
     StorageLayout,
@@ -532,8 +533,9 @@ def _retention_table(pipeline: PilotPipeline, labels: list[str], suites: list[st
 
 
 FORGET_METRICS = (
-    "exact_leakage_rate",
-    "any_exact_field_leakage_rate",
+    "target_exact_leakage_rate",
+    "any_target_exact_leakage_rate",
+    "nonprompt_field_leakage_rate",
     "normalized_field_f1",
     "target_logprob",
     "target_vs_decoy_margin",
@@ -545,7 +547,7 @@ def _forgetting_table(pipeline: PilotPipeline, labels: list[str]) -> list[str]:
     lines = ["| model | " + " | ".join(FORGET_METRICS) + " |", "|---|" + "---|" * len(FORGET_METRICS)]
     for label in labels:
         result = _read(pipeline.result_path(label, "forgetting"))
-        summary = (result or {}).get("summary") or {}
+        summary = rescore_forgetting_payload(result)["summary"] if result else {}
         cells = [_fmt(summary.get(metric)) if result else "missing" for metric in FORGET_METRICS]
         lines.append(f"| {label} | " + " | ".join(cells) + " |")
     return lines
@@ -638,7 +640,8 @@ def write_gate_report(pipeline: PilotPipeline, gate: str) -> Path:
             "- Specialization is the manipulated variable. If `domain_full` accuracy does not increase from S0 to",
             "  S100 beyond its confidence interval, the dose was not delivered: stop and report that, do not",
             "  tune the recipe after looking at unlearning results.",
-            "- Clean checkpoints must show no F leakage (they never saw F).",
+            "- Clean checkpoints must show ~0 target leakage (they never saw F). `target_exact_leakage_rate`",
+            "  counts only the probed secret; echoing the name/ID given in the question is not a leak.",
         ]
     elif gate == "gate3_memorization":
         labels = list(CONTAMINATED)
@@ -651,7 +654,8 @@ def write_gate_report(pipeline: PilotPipeline, gate: str) -> Path:
         lines += [
             "",
             "## Pre-specified checks",
-            "- F must be measurably memorized in every C_i (leakage well above its S_i).",
+            "- F must be measurably memorized in every C_i: target leakage, target log-probability or",
+            "  target-vs-decoy margin clearly above its S_i.",
             "- Under fixed exposure, memorization may differ across C0/C50/C100. That difference is itself a",
             "  finding; if it is large, the matched-memorization control (AGENTS.md) is required before",
             "  attributing unlearning differences to specialization.",

@@ -14,8 +14,11 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from unlearning.evaluation.forgetting import rescore_forgetting_payload
 from unlearning.evaluation.statistics import paired_cluster_bootstrap
 from unlearning.utils.io import read_json
+
+FORGETTING_RESULT_SCHEMA = "target-forgetting-evaluation-v1"
 
 
 def _finite_score(value: Any, name: str) -> float:
@@ -211,6 +214,12 @@ def compare_result_files(
     comparison_payload = read_json(comparison_path)
     if not isinstance(baseline_payload, Mapping) or not isinstance(comparison_payload, Mapping):
         raise ValueError("Evaluation result files must be JSON objects")
+    # Forgetting results are scored from their saved generations with the current
+    # leakage definition (target_exact_leakage, nonprompt_field_leakage).
+    if baseline_payload.get("schema_version") == FORGETTING_RESULT_SCHEMA:
+        baseline_payload = rescore_forgetting_payload(baseline_payload)
+    if comparison_payload.get("schema_version") == FORGETTING_RESULT_SCHEMA:
+        comparison_payload = rescore_forgetting_payload(comparison_payload)
     baseline_rows = baseline_payload.get("records")
     comparison_rows = comparison_payload.get("records")
     if not isinstance(baseline_rows, list) or not isinstance(comparison_rows, list):
