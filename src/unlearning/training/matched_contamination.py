@@ -76,6 +76,7 @@ from unlearning.training.contaminate import (
     tokenize_completion_example,
 )
 from unlearning.training.engine import (
+    NonFiniteLoss,
     TrainingLoop,
     apply_resume_state,
     create_accelerator,
@@ -394,7 +395,36 @@ def run_calibration(
                 history_path=candidate_dir / "memorization.jsonl",
             )
             run_log.update(state="running", learning_rate=learning_rate, target_recall=arm.target_recall)
-            result = loop.run(start_step=0)
+            try:
+                result = loop.run(start_step=0)
+            except NonFiniteLoss as diverged:
+                # A candidate that diverges is a recorded outcome, not a crash of the calibration.
+                report["candidates"].append(
+                    {
+                        "learning_rate": learning_rate,
+                        "reached_target": False,
+                        "diverged": True,
+                        "diverged_at_step": diverged.step,
+                        "steps_to_target": None,
+                        "epochs_to_target": None,
+                        "steps_run": diverged.step - 1,
+                        "final_memorization": history[-1] if history else None,
+                        "best_mean_recall": max((entry["mean_recall"] for entry in history), default=None),
+                        "memorization_history": history,
+                        "damage_accuracy": None,
+                        "accuracy_drop": None,
+                        "qualifies": False,
+                        "error": str(diverged),
+                        "runtime_seconds": time.perf_counter() - started,
+                    }
+                )
+                save_report()
+                run_log.finish("completed", message=f"learning rate {learning_rate:g}: diverged at step {diverged.step}")
+                monitor.stop()
+                model = optimizer = scheduler = loop = None
+                accelerator.free_memory()
+                _cleanup(torch)
+                continue
             if not result.completed:
                 monitor.stop()
                 run_log.finish("interrupted", message="calibration candidate restarts from scratch on rerun")
@@ -412,6 +442,7 @@ def run_calibration(
             candidate = {
                 "learning_rate": learning_rate,
                 "reached_target": reached,
+                "diverged": False,
                 "steps_to_target": loop.completed_step if reached else None,
                 "epochs_to_target": (loop.completed_step / plan.steps_per_epoch) if reached else None,
                 "steps_run": loop.completed_step,

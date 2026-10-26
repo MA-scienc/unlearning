@@ -107,6 +107,44 @@ class EarlyFinishTests(unittest.TestCase):
             self.assertEqual(loop.completed_step, 3)
 
 
+class DivergenceTests(unittest.TestCase):
+    def test_nan_loss_raises_a_typed_divergence_error_with_its_step(self):
+        from unlearning.training.engine import NonFiniteLoss
+
+        class ExplodesAtStep2(SpecializationObjective):
+            def loss_sum(self, model, batch):
+                loss, stats = super().loss_sum(model, batch)
+                return (loss * float("nan") if self.current_step == 2 else loss), stats
+
+            def micro_batches(self, step):
+                self.current_step = step
+                return super().micro_batches(step)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            loop = TrainingLoop(
+                accelerator=create_accelerator(cpu=True),
+                model=tiny_model(),
+                optimizer=None,
+                scheduler=None,
+                objective=ExplodesAtStep2(
+                    torch.randint(1, 61, (8, 8), generator=torch.Generator().manual_seed(3)),
+                    effective_batch_sequences=2,
+                    micro_batch_sequences=2,
+                ),
+                total_steps=5,
+                max_grad_norm=None,
+                run_log=RunLog(root / "log", run_id="t", stage="t", total_steps=5, console_every_steps=100),
+                resume_store=ResumeStore(root / "resume", keep_last=1, every_minutes=60),
+                stop=GracefulStop(),
+                settings=MachineSettings.from_env({"UNLEARNING_STORAGE_ROOT": str(root), "UNLEARNING_MIN_FREE_DISK_GB": "0"}),
+            )
+            loop.optimizer = torch.optim.SGD(loop.model.parameters(), lr=1e-3)
+            with self.assertRaises(NonFiniteLoss) as caught:
+                loop.run(start_step=0)
+            self.assertEqual(caught.exception.step, 2)
+
+
 class MatchedSourceTests(unittest.TestCase):
     def setUp(self):
         self.config = PilotConfig.from_dict(minimal_config())

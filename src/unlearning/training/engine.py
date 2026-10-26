@@ -47,6 +47,14 @@ IGNORE_INDEX = -100
 StatSums = dict[str, tuple[Any, Any]]
 
 
+class NonFiniteLoss(RuntimeError):
+    """Training diverged: the loss became NaN or infinite at ``step``."""
+
+    def __init__(self, message: str, step: int):
+        super().__init__(message)
+        self.step = step
+
+
 @dataclass(frozen=True)
 class MicroBatch:
     tensors: dict[str, Any]
@@ -251,8 +259,9 @@ class TrainingLoop:
                     loss_sum, stats = self.objective.loss_sum(self.model, batch)
                 detached = loss_sum.detach().float()
                 if not bool(torch.isfinite(detached)):
-                    raise RuntimeError(
-                        f"Non-finite {self.objective.name} loss at optimizer step {step}: {float(detached)}"
+                    raise NonFiniteLoss(
+                        f"Non-finite {self.objective.name} loss at optimizer step {step}: {float(detached)}",
+                        step,
                     )
                 (loss_sum * (world / normalizer)).backward()
             loss_total += detached

@@ -733,7 +733,8 @@ def write_gate_report(pipeline: PilotPipeline, gate: str) -> Path:
             by_template = final.get("by_template") or {}
             drops = candidate.get("accuracy_drop") or {}
             lines.append(
-                f"| {candidate['learning_rate']:g} | {'yes' if candidate['reached_target'] else 'no'} | "
+                f"| {candidate['learning_rate']:g} | "
+                f"{'yes' if candidate['reached_target'] else ('no: diverged at step ' + str(candidate.get('diverged_at_step')) if candidate.get('diverged') else 'no')} | "
                 f"{_fmt(candidate.get('epochs_to_target') or (candidate.get('steps_run', 0) / 60), 1)} | "
                 f"{_fmt(final.get('mean_recall'))} ({_fmt(by_template.get('condition_lookup'), 2)} / "
                 f"{_fmt(by_template.get('medication_lookup'), 2)} / {_fmt(by_template.get('private_code_lookup'), 2)}) | "
