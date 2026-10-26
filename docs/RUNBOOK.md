@@ -8,10 +8,16 @@ and move it to rented GPUs. The scientific design is in
 
 ```
 preflight ──► gate 0 ──► benchmark ──► gate 1 ──► specialize (S0 → S50 → S100)
-   ──► evaluate S ──► gate 2 ──► contaminate S+F → C0, C50, C100
-   ──► evaluate C ──► gate 3 ──► unlearn GA/NPO × C0/C50/C100 (snapshots 0…400)
-   ──► evaluate U ──► aggregate tables + figures
+   ──► evaluate S ──► gate 2 ──► fixed-exposure contamination C0/C50/C100 ──► evaluate C (reference arm)
+   ──► calibrate contamination learning rate on C0 ──► gate calibration
+   ──► matched-memorization contamination MM_C0/MM_C50/MM_C100 ──► evaluate MM_C ──► gate 3
+   ──► unlearn GA/NPO × MM_C0/MM_C50/MM_C100 (snapshots 0…400) ──► evaluate U ──► aggregate
 ```
+
+The matched-memorization arm was added on 2026-10-25 (see the amendment log): the frozen
+fixed-exposure recipe did not make the 0.5B model memorize which fact belongs to which
+patient, so each S_i is now trained on F until it reaches the same recall on the training
+questions, with a learning rate calibrated once on C0.
 
 | Job | What it does | Measured on the RTX 4070 laptop (2026-10-24, Qwen2.5-0.5B) |
 |---|---|---|
@@ -33,7 +39,8 @@ existed (`runs/<run_id>/pipeline/gates/<gate>.md`).
 | `gate0_data` | step budget, F counts, near/far sets | any count or budget is not the protocol's |
 | `gate1_hardware` | memory per stage, resume round-trip, projected time and disk | out-of-memory, resume check failed, not enough time/disk |
 | `gate2_specialization` | MedMCQA dev accuracy of S0/S50/S100 | accuracy does not rise S0 → S100: the manipulated variable is missing |
-| `gate3_memorization` | F leakage of C0/C50/C100 vs S0/S50/S100 | F not memorized; large memorization differences mean the matched-memorization control is needed |
+| `gate_calibration` | learning-rate candidates: recall curve, epochs to target, collateral damage | no candidate qualified: stop and record it; never add larger rates after the fact |
+| `gate3_memorization` | matched C: target reached, steps needed, damage; held-out F probes vs S | a C_i did not reach the target, or exceeded the damage limit |
 
 The pipeline never decides these questions. Do not change the recipe after
 looking at gate 2 or 3 results; record any change as a dated amendment in

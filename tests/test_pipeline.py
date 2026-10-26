@@ -27,10 +27,13 @@ class PipelinePlanTests(unittest.TestCase):
         jobs = self.pipeline().jobs()
         ids = [job.id for job in jobs]
         self.assertEqual(len(ids), len(set(ids)))
-        # 3 clean x 6 suites + 3 contaminated x 5 + 30 unlearned snapshots x 5
-        self.assertEqual(sum(job.id.startswith("eval__") for job in jobs), 18 + 15 + 150)
+        # 3 clean x 6 suites + 3 fixed C x 5 + 3 matched C x 5 + 30 unlearned snapshots x 5
+        self.assertEqual(sum(job.id.startswith("eval__") for job in jobs), 18 + 15 + 15 + 150)
         order = ["preflight", "gate0_data", "benchmark", "gate1_hardware", "specialize",
-                 "gate2_specialization", "contaminate_C0", "gate3_memorization", "unlearn_C100_npo", "aggregate"]
+                 "gate2_specialization", "contaminate_C0", "calibrate_MM", "gate_calibration",
+                 "contaminate_MM_C0", "eval__MM_C0__forgetting", "gate3_memorization",
+                 "unlearn_MM_C100_npo", "eval__MM_U_C100_npo_step0400__near", "aggregate"]
+        self.assertFalse(any(job.id.startswith("unlearn_C") for job in jobs))  # fixed arm is not unlearned
         self.assertEqual([ids.index(name) for name in order], sorted(ids.index(name) for name in order))
         self.assertEqual({job.gate for job in jobs if job.kind == "gate"}, set(GATES))
 
@@ -43,7 +46,9 @@ class PipelinePlanTests(unittest.TestCase):
         self.assertIn("--resume", laptop["specialize"].command)
         self.assertNotIn("accelerate.commands.launch", laptop["specialize"].command)
         ddp = {job.id: job for job in self.pipeline(DDP).jobs()}
-        self.assertIn("accelerate.commands.launch", ddp["unlearn_C0_ga"].command)
+        self.assertIn("accelerate.commands.launch", ddp["unlearn_MM_C0_ga"].command)
+        self.assertIn("accelerate.commands.launch", ddp["contaminate_MM_C50"].command)
+        self.assertNotIn("accelerate.commands.launch", ddp["calibrate_MM"].command)  # single process
         self.assertNotIn("accelerate.commands.launch", ddp["eval__C0__near"].command)
 
     def test_run_stops_at_an_unapproved_gate_and_approval_requires_its_report(self):

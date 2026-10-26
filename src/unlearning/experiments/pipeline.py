@@ -24,10 +24,17 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from unlearning.config import PilotConfig, load_config
+from unlearning.config.arms import load_matched_memorization_arm
 from unlearning.evaluation.forgetting import rescore_forgetting_payload
+from unlearning.training.matched_contamination import (
+    DEFAULT_ARM_PATH,
+    FINAL_CALIBRATION_STATES,
+    calibration_report_path,
+    matched_checkpoint_dir,
+)
 from unlearning.runtime.layout import (
     CONTAMINATED_FOR_CLEAN,
     StorageLayout,
@@ -51,7 +58,8 @@ GATES = {
     "gate0_data": "Data review: preflight artifacts, step budget, F separation",
     "gate1_hardware": "Hardware review: benchmark memory, speed, resume check, projected time",
     "gate2_specialization": "Specialization review: did domain performance move from S0 to S100?",
-    "gate3_memorization": "Memorization review: was F learned by C0/C50/C100, and how evenly?",
+    "gate_calibration": "Calibration review: which contamination learning rate memorizes F without collateral damage?",
+    "gate3_memorization": "Memorization review: is F memorized, and matched, in MM_C0/MM_C50/MM_C100?",
 }
 
 
@@ -84,6 +92,8 @@ class Job:
     outputs: tuple[Path, ...] = ()
     gate: str | None = None
     always_run: bool = False
+    # Optional custom completion test (e.g. a report whose status must be final).
+    done_check: Callable[[], bool] | None = None
     # Jobs after preflight + benchmark need nothing from the network: everything
     # is in the local cache. Offline mode avoids Hub rate limits and outages.
     offline: bool = True
@@ -93,6 +103,8 @@ class Job:
             return self.gate in approvals
         if self.always_run:
             return False
+        if self.done_check is not None:
+            return self.done_check()
         return bool(self.outputs) and all(path.is_file() for path in self.outputs)
 
 
@@ -105,8 +117,17 @@ class ModelRef:
 
 
 class PilotPipeline:
-    def __init__(self, *, config_path: Path, runtime_path: Path, settings: MachineSettings | None = None):
+    def __init__(
+        self,
+        *,
+        config_path: Path,
+        runtime_path: Path,
+        settings: MachineSettings | None = None,
+        arm_path: Path = DEFAULT_ARM_PATH,
+    ):
         self.settings = settings or MachineSettings.from_env()
+        self.arm_path = Path(arm_path).resolve()
+        self.arm = load_matched_memorization_arm(self.arm_path)
         self.config_path = Path(config_path).resolve()
         self.runtime_path = Path(runtime_path).resolve()
         self.config: PilotConfig = load_config(self.config_path)
@@ -175,16 +196,27 @@ class PilotPipeline:
             for name in CONTAMINATED
         ]
 
+    def matched_contaminated_models(self) -> list[ModelRef]:
+        refs = []
+        for name in CONTAMINATED:
+            directory = matched_checkpoint_dir(self.layout, self.arm, name)
+            refs.append(ModelRef(f"{self.arm.tag}_{name}", str(directory), directory / "manifest.json", "contaminated"))
+        return refs
+
     def unlearned_models(self) -> list[ModelRef]:
+        """Unlearning runs on the matched-memorization C_i (amendment 2026-10-25)."""
+
         refs = []
         for contaminated in CONTAMINATED:
             for method in METHODS:
-                trajectory = self.layout.unlearning_trajectory(self.config, contaminated, method)
+                trajectory = self.layout.unlearning_trajectory(
+                    self.config, contaminated, method, condition="matched_memorization"
+                )
                 for step in self.config.unlearning.snapshot_steps:
                     snapshot = trajectory / f"step{step:04d}"
                     refs.append(
                         ModelRef(
-                            f"U_{contaminated}_{method}_step{step:04d}",
+                            f"{self.arm.tag}_U_{contaminated}_{method}_step{step:04d}",
                             str(snapshot),
                             snapshot / "manifest.json",
                             "unlearned",
@@ -256,11 +288,12 @@ class PilotPipeline:
         jobs.append(
             Job(id="gate2_specialization", group="clean_eval", title=GATES["gate2_specialization"], kind="gate", gate="gate2_specialization")
         )
+        # Fixed-exposure arm (pre-registered; kept as the reference condition).
         for clean_name, contaminated in CONTAMINATED_FOR_CLEAN.items():
             jobs.append(
                 Job(
                     id=f"contaminate_{contaminated}",
-                    group="contamination",
+                    group="fixed_contamination",
                     title=f"fixed-exposure contamination {clean_name} + F -> {contaminated}",
                     kind="command",
                     command=self._training(
@@ -269,23 +302,59 @@ class PilotPipeline:
                     outputs=(layout.contaminated_checkpoint(contaminated) / "manifest.json",),
                 )
             )
-        jobs += self._eval_jobs("contaminated_eval", self.contaminated_models())
+        jobs += self._eval_jobs("fixed_contaminated_eval", self.contaminated_models())
+
+        # Matched-memorization arm (amendment 2026-10-25): calibrate on C0, then match.
+        arm_args = ("--arm", str(self.arm_path))
+        report = calibration_report_path(layout, self.arm)
         jobs.append(
-            Job(id="gate3_memorization", group="contaminated_eval", title=GATES["gate3_memorization"], kind="gate", gate="gate3_memorization")
+            Job(
+                id=f"calibrate_{self.arm.tag}",
+                group="calibration",
+                title="contamination learning-rate calibration on C0 (memorization + damage probes)",
+                kind="command",
+                command=self._python("calibrate_contamination.py", "--runtime", str(self.runtime_path), *arm_args),
+                outputs=(report,),
+                done_check=lambda: report.is_file()
+                and read_json(report).get("status") in FINAL_CALIBRATION_STATES,
+            )
+        )
+        jobs.append(
+            Job(id="gate_calibration", group="calibration", title=GATES["gate_calibration"], kind="gate", gate="gate_calibration")
+        )
+        for clean_name, contaminated in CONTAMINATED_FOR_CLEAN.items():
+            jobs.append(
+                Job(
+                    id=f"contaminate_{self.arm.tag}_{contaminated}",
+                    group="matched_contamination",
+                    title=f"matched-memorization contamination {clean_name} + F -> {self.arm.tag}_{contaminated}",
+                    kind="command",
+                    command=self._training(
+                        "contaminate_matched.py",
+                        "--clean-checkpoint",
+                        str(layout.clean_checkpoint(clean_name)),
+                        *arm_args,
+                    ),
+                    outputs=(matched_checkpoint_dir(layout, self.arm, contaminated) / "manifest.json",),
+                )
+            )
+        jobs += self._eval_jobs("matched_contaminated_eval", self.matched_contaminated_models())
+        jobs.append(
+            Job(id="gate3_memorization", group="matched_contaminated_eval", title=GATES["gate3_memorization"], kind="gate", gate="gate3_memorization")
         )
         for contaminated in CONTAMINATED:
             for method in METHODS:
-                trajectory = layout.unlearning_trajectory(self.config, contaminated, method)
+                trajectory = layout.unlearning_trajectory(self.config, contaminated, method, condition="matched_memorization")
                 jobs.append(
                     Job(
-                        id=f"unlearn_{contaminated}_{method}",
+                        id=f"unlearn_{self.arm.tag}_{contaminated}_{method}",
                         group="unlearning",
-                        title=f"{method.upper()} unlearning from {contaminated}",
+                        title=f"{method.upper()} unlearning from {self.arm.tag}_{contaminated}",
                         kind="command",
                         command=self._training(
                             "unlearn.py",
                             "--contaminated-checkpoint-dir",
-                            str(layout.contaminated_checkpoint(contaminated)),
+                            str(matched_checkpoint_dir(layout, self.arm, contaminated)),
                             "--method",
                             method,
                         ),
@@ -471,7 +540,7 @@ def print_status(pipeline: PilotPipeline, *, show_all: bool = False) -> None:
     next_job = next((job for job in jobs if not job.done(approvals)), None)
     for group, members in groups.items():
         done = sum(1 for job in members if job.done(approvals) or (job.always_run and all(p.is_file() for p in job.outputs)))
-        print(f"  {group:18s} {done:>3}/{len(members):<3} {'done' if done == len(members) else ''}")
+        print(f"  {group:26s} {done:>3}/{len(members):<3} {'done' if done == len(members) else ''}")
         if show_all:
             for job in members:
                 flag = "x" if job.done(approvals) else " "
@@ -643,22 +712,80 @@ def write_gate_report(pipeline: PilotPipeline, gate: str) -> Path:
             "- Clean checkpoints must show ~0 target leakage (they never saw F). `target_exact_leakage_rate`",
             "  counts only the probed secret; echoing the name/ID given in the question is not a leak.",
         ]
+    elif gate == "gate_calibration":
+        report = _read(calibration_report_path(layout, pipeline.arm)) or {}
+        arm = pipeline.arm
+        baseline = report.get("baseline") or {}
+        base_recall = (baseline.get("memorization") or {}).get("mean_recall")
+        base_acc = baseline.get("damage_accuracy") or {}
+        lines += [
+            f"Rule (fixed before running): smallest learning rate reaching recall >= {arm.target_recall:.2f} "
+            f"within {arm.max_epochs} epochs with accuracy drop <= {arm.max_accuracy_drop:.2f} on both damage probes.",
+            "",
+            f"S0 baseline: memorization recall {_fmt(base_recall)}, damage-probe accuracy "
+            f"general {_fmt(base_acc.get('general'))} / medical {_fmt(base_acc.get('medical'))}",
+            "",
+            "| learning rate | reached target | epochs | recall at stop (condition / medication / code) | accuracy drop (general / medical) | qualifies |",
+            "|---|---|---|---|---|---|",
+        ]
+        for candidate in report.get("candidates") or []:
+            final = candidate.get("final_memorization") or {}
+            by_template = final.get("by_template") or {}
+            drops = candidate.get("accuracy_drop") or {}
+            lines.append(
+                f"| {candidate['learning_rate']:g} | {'yes' if candidate['reached_target'] else 'no'} | "
+                f"{_fmt(candidate.get('epochs_to_target') or (candidate.get('steps_run', 0) / 60), 1)} | "
+                f"{_fmt(final.get('mean_recall'))} ({_fmt(by_template.get('condition_lookup'), 2)} / "
+                f"{_fmt(by_template.get('medication_lookup'), 2)} / {_fmt(by_template.get('private_code_lookup'), 2)}) | "
+                f"{_fmt(drops.get('general'))} / {_fmt(drops.get('medical'))} | {'YES' if candidate['qualifies'] else 'no'} |"
+            )
+        lines += [
+            "",
+            f"**Status: {report.get('status')}; selected learning rate: {report.get('selected_learning_rate')}**",
+            "",
+            "## Check before approving",
+            "- [ ] The rule above was applied as written (smallest qualifying candidate).",
+            "- [ ] If no candidate qualified: stop and record that; do not add larger learning rates after the fact.",
+            f"- Full report with per-epoch recall curves: `{calibration_report_path(layout, arm)}`",
+        ]
     elif gate == "gate3_memorization":
-        labels = list(CONTAMINATED)
-        lines += ["## Target memorization before unlearning (C_i)", ""]
-        lines += _forgetting_table(pipeline, labels)
-        lines += ["", "## Clean counterfactuals for comparison (S_i)", ""]
+        arm = pipeline.arm
+        lines += [
+            "## Matched memorization (from the C_i manifests)",
+            "",
+            "| model | target reached | steps (epochs) | recall at stop (cond / med / code) | accuracy drop vs S_i (general / medical) |",
+            "|---|---|---|---|---|",
+        ]
+        for name in CONTAMINATED:
+            manifest = _read(matched_checkpoint_dir(layout, arm, name) / "manifest.json") or {}
+            memorization = manifest.get("memorization") or {}
+            at_stop = memorization.get("recall_at_stop") or {}
+            by_template = at_stop.get("by_template") or {}
+            drops = (manifest.get("damage") or {}).get("accuracy_drop") or {}
+            steps = memorization.get("steps_used")
+            lines.append(
+                f"| {arm.tag}_{name} | {memorization.get('target_reached')} | {steps} "
+                f"({_fmt((steps or 0) / 60, 1)}) | {_fmt(at_stop.get('mean_recall'))} "
+                f"({_fmt(by_template.get('condition_lookup'), 2)} / {_fmt(by_template.get('medication_lookup'), 2)} / "
+                f"{_fmt(by_template.get('private_code_lookup'), 2)}) | {_fmt(drops.get('general'))} / {_fmt(drops.get('medical'))} |"
+            )
+        matched = [f"{arm.tag}_{name}" for name in CONTAMINATED]
+        lines += ["", "## Held-out forgetting probes: matched C_i", ""]
+        lines += _forgetting_table(pipeline, matched)
+        lines += ["", "## Clean counterfactuals S_i", ""]
         lines += _forgetting_table(pipeline, list(CLEAN))
-        lines += ["", "## Retention of C_i", ""]
-        lines += _retention_table(pipeline, labels, ["near", "far", "general", "external_medical"])
+        lines += ["", "## Fixed-exposure C_i (reference, not unlearned)", ""]
+        lines += _forgetting_table(pipeline, list(CONTAMINATED))
+        lines += ["", "## Retention of matched C_i", ""]
+        lines += _retention_table(pipeline, matched, ["near", "far", "general", "external_medical"])
         lines += [
             "",
             "## Pre-specified checks",
-            "- F must be measurably memorized in every C_i: target leakage, target log-probability or",
-            "  target-vs-decoy margin clearly above its S_i.",
-            "- Under fixed exposure, memorization may differ across C0/C50/C100. That difference is itself a",
-            "  finding; if it is large, the matched-memorization control (AGENTS.md) is required before",
-            "  attributing unlearning differences to specialization.",
+            "- Every matched C_i reached the target recall (training questions) within the cap.",
+            "- Collateral damage of each C_i vs its S_i is within the arm limit (accuracy drop column).",
+            "- Held-out probes: target leakage / likelihood / decoy margin clearly above S_i. Recall on the",
+            "  training questions is matched by design; held-out generalization may still differ by level.",
+            "- The steps each C_i needed are a finding (learnability), not a failure.",
         ]
     path = pipeline.gate_report_path(gate)
     ensure_dir(path.parent)

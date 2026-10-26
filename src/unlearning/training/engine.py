@@ -171,6 +171,10 @@ class TrainingLoop:
     on_step_end: Callable[[int, dict[str, Any]], bool] | None = None
     resume_meta: Callable[[int, dict[str, Any]], dict[str, Any]] | None = None
     completed_step: int = field(default=0, init=False)
+    # Set by on_step_end to end training successfully at the current step (for
+    # example once a memorization target is reached). Every process must set it
+    # identically, i.e. from a deterministic computation on identical weights.
+    finish_now: bool = field(default=False, init=False)
 
     def run(self, *, start_step: int) -> LoopResult:
         import torch
@@ -194,7 +198,7 @@ class TrainingLoop:
 
             saved_full_state = bool(self.on_step_end(step, metrics)) if self.on_step_end else False
             stop_now, save_due = self._agreed_flags(torch, device, world)
-            if step == self.total_steps:
+            if step == self.total_steps or self.finish_now:
                 break
             if saved_full_state:
                 self.resume_store.mark_saved()
@@ -212,7 +216,7 @@ class TrainingLoop:
                 )
         return LoopResult(
             last_step=step,
-            completed=step == self.total_steps,
+            completed=step == self.total_steps or self.finish_now,
             stop_reason=None,
             last_metrics=last_metrics,
             runtime_seconds=time.perf_counter() - started,
@@ -328,6 +332,8 @@ class TrainingLoop:
             torch=torch,
             meta={"reason": reason, "last_loss": metrics.get("loss"), **extra},
         )
+        if point is None:  # a store that deliberately keeps no resume points
+            return
         self.run_log.event(
             "resume_point_saved",
             f"step {step} ({reason}) in {time.perf_counter() - saved_at:.0f}s",

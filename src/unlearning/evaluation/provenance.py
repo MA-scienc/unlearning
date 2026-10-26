@@ -22,6 +22,7 @@ from unlearning.utils.io import read_json
 _SUPPORTED_CHECKPOINT_SCHEMAS = {
     ("clean_specialization_checkpoint", "clean-specialization-checkpoint-v2"),
     ("contaminated_checkpoint", "fixed-exposure-contamination-v2"),
+    ("contaminated_checkpoint", "matched-memorization-contamination-v1"),
     ("unlearning_snapshot", "unlearning-snapshot-v2"),
 }
 

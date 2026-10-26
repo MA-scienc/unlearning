@@ -1,0 +1,44 @@
+# Matched-memorization contamination arm (protocol amendment 2026-10-25).
+#
+# Why: under the frozen fixed-exposure recipe (lr 1e-5, 10 epochs) the 0.5B
+# model learned the format and value pool of F but not which value belongs to
+# which patient (recall on the exact training questions ~chance, 0% for codes).
+# This arm trains each S_i on F until it reaches the same memorization level,
+# so C0/C50/C100 start unlearning with equally memorized F. The number of steps
+# each needs is recorded as a secondary "learnability" outcome.
+#
+# Kept separate from configs/pilot/*.yaml so the experiment run ID -- and the
+# finished S0/S50/S100 checkpoints bound to it -- stay valid.
+name: matched_memorization
+tag: MM                      # prefix for result labels, e.g. MM_C50, MM_U_C50_npo_step0100
+
+training:
+  optimizer: adamw_8bit
+  scheduler: constant_with_warmup   # constant LR: the stopping point must not change the schedule
+  warmup_steps: 30
+  weight_decay: 0.0
+  effective_batch_size: 16           # same F batches, same order as the fixed-exposure arm
+  sequence_length: 512
+  max_epochs: 50                     # hard cap: 50 passes over F (3,000 optimizer steps)
+
+calibration:
+  # Run on C0 only (S0 + F), smallest first. Selected: the smallest learning rate
+  # that reaches target_recall within max_epochs without exceeding the damage limit.
+  # If none qualifies, report that; do not keep raising the learning rate.
+  learning_rate_candidates: [3.0e-5, 1.0e-4, 3.0e-4]
+
+memorization:
+  # Teacher-forced exact recall on the exact training questions: a probe counts
+  # only if the model's top prediction is correct for every answer token
+  # (equivalent to greedy decoding reproducing the answer).
+  probe_templates: [condition_lookup, medication_lookup, private_code_lookup]
+  target_recall: 0.90              # mean over the three templates (120 patients each)
+  check_every_epochs: 1
+
+damage:
+  # Collateral damage at the moment the target is reached, versus the clean S_i,
+  # on probe sets that are disjoint from every evaluation set.
+  max_accuracy_drop: 0.02
+  general_probe_size: 1000         # MMLU-CF val items not in the evaluation subset
+  medical_probe_size: 1000         # MedMCQA train items (the specialization data)
+  seed: 4242

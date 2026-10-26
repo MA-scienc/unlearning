@@ -231,6 +231,16 @@ function Show-Frame {
                 Write-Line ("throughput {0:N0} tok/s   peak GPU memory {1:N2} GB allocated / {2:N2} GB reserved   micro-batch {3} x {4} process(es)" -f (Get-Number $m.tokens_per_second), (Get-Number $m.peak_memory_gb), (Get-Number $m.peak_reserved_gb), $status.micro_batch, $status.processes) "Gray"
                 if ($null -eq $m.loss) { $warnings.Add("loss is not a finite number") }
             }
+            if ($status.memorization) {
+                $mem = $status.memorization
+                $templates = @()
+                foreach ($property in $mem.by_template.PSObject.Properties) { $templates += ("{0} {1:N2}" -f ($property.Name -replace '_lookup', ''), $property.Value) }
+                $target = ""
+                if ($status.target_recall) { $target = (" / target {0:N2}" -f $status.target_recall) }
+                $lr = ""
+                if ($status.learning_rate) { $lr = ("   lr {0:G3}" -f $status.learning_rate) }
+                Write-Line ("memorization recall {0:N3}{1} after epoch {2}  ({3}){4}" -f (Get-Number $mem.mean_recall), $target, $mem.epoch, ($templates -join ", "), $lr) "Cyan"
+            }
             if ($status.last_resume_point) { Write-Line ("last resume point: step {0}" -f $status.last_resume_point.step) "Gray" }
             if ($status.last_scientific_checkpoint) { Write-Line ("last scientific checkpoint: {0} (step {1})" -f $status.last_scientific_checkpoint.name, $status.last_scientific_checkpoint.step) "Gray" }
             if ($status.resume_count -gt 0) { Write-Line ("resumed {0} time(s)" -f $status.resume_count) "Gray" }
@@ -244,7 +254,7 @@ function Show-Frame {
             $events = Read-JsonLines (Join-Path $stageDir "events.jsonl") 4
             if ($events.Count -gt 0) {
                 Write-Line "recent events:" "DarkGray"
-                foreach ($event in $events) { Write-Line ("  {0}  {1}: {2}" -f $event.time, $event.kind, $event.message) "DarkGray" }
+                foreach ($entry in $events) { Write-Line ("  {0}  {1}: {2}" -f $entry.time, $entry.kind, $entry.message) "DarkGray" }
             }
             if ($status.system) {
                 $sys = $status.system

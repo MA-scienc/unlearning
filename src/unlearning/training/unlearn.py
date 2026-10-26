@@ -60,6 +60,7 @@ from unlearning.runtime.stage import (
     verify_or_write_run_plan,
 )
 from unlearning.training.contaminate import CONTAMINATION_MANIFEST_SCHEMA
+from unlearning.training.matched_contamination import MATCHED_CONTAMINATION_MANIFEST_SCHEMA
 from unlearning.training.engine import (
     MicroBatch,
     TrainingLoop,
@@ -112,6 +113,20 @@ class ContaminatedSource:
     @property
     def specialization_fraction(self) -> float:
         return {"C0": 0.0, "C50": 0.5, "C100": 1.0}[self.name]
+
+    @property
+    def condition(self) -> str:
+        """Contamination arm: fixed_exposure or matched_memorization."""
+
+        return str((self.manifest.get("contamination") or {}).get("condition") or "fixed_exposure")
+
+    @property
+    def label_prefix(self) -> str:
+        """Prefix that keeps outputs of different contamination arms apart ('' or 'MM_')."""
+
+        if self.condition == "fixed_exposure":
+            return ""
+        return f"{(self.manifest.get('contamination') or {}).get('arm_tag', 'ARM')}_"
 
 
 @dataclass(frozen=True)
@@ -594,7 +609,8 @@ def load_contaminated_source(
         raise ValueError("Contaminated checkpoint manifest lacks immutable manifest metadata")
     if artifact_manifest.get("artifact_type") != "contaminated_checkpoint":
         raise ValueError("Unlearning input must be a contamination-stage checkpoint manifest")
-    if artifact_manifest.get("schema_version") != CONTAMINATION_MANIFEST_SCHEMA:
+    schema_version = artifact_manifest.get("schema_version")
+    if schema_version not in {CONTAMINATION_MANIFEST_SCHEMA, MATCHED_CONTAMINATION_MANIFEST_SCHEMA}:
         raise ValueError("Unsupported contaminated checkpoint manifest schema")
     expected_manifest_fingerprint = fingerprint_payload(
         {key: value for key, value in manifest.items() if key != "manifest"}
@@ -656,6 +672,10 @@ def load_contaminated_source(
         contamination = manifest["contamination"]
         if not isinstance(contamination, dict):
             raise ValueError("Contaminated checkpoint contamination settings must be an object")
+    if config is not None and schema_version == MATCHED_CONTAMINATION_MANIFEST_SCHEMA:
+        _validate_matched_contamination(manifest, config)
+    elif config is not None:
+        contamination = manifest["contamination"]
         expected_contamination = asdict(config.contamination)
         observed_contamination = {
             field: contamination.get(field) for field in expected_contamination
@@ -714,6 +734,27 @@ def load_contaminated_source(
         source_run_id=manifest.get("run_id"),
         manifest=manifest,
     )
+
+
+def _validate_matched_contamination(manifest: dict[str, Any], config: PilotConfig) -> None:
+    """Checks for a matched-memorization C_i (variable steps, recipe from its arm)."""
+
+    contamination = manifest["contamination"]
+    if contamination.get("condition") != "matched_memorization":
+        raise ValueError("Matched-memorization manifest must record condition matched_memorization")
+    for field in ("arm_fingerprint", "arm_tag", "learning_rate", "calibration_report_sha256"):
+        if not contamination.get(field):
+            raise ValueError(f"Matched-memorization manifest lacks contamination.{field}")
+    if contamination.get("effective_batch_size") != config.contamination.effective_batch_size:
+        raise ValueError("Matched-memorization batch size does not match the experiment config")
+    memorization = manifest.get("memorization")
+    if not isinstance(memorization, dict) or not isinstance(memorization.get("history"), list):
+        raise ValueError("Matched-memorization manifest lacks its memorization record")
+    exposure_plan = manifest["exposure_plan"]
+    if not (
+        manifest["global_step"] == memorization.get("steps_used") == exposure_plan.get("optimizer_steps")
+    ):
+        raise ValueError("Matched-memorization global_step does not match its recorded steps")
 
 
 def _resolve_forget_examples_path(forget_examples_path: str | Path) -> Path:
@@ -782,7 +823,7 @@ def build_unlearning_trajectory_plan(
         "unlearned",
         checkpoint_fraction=source.specialization_fraction,
         method=method,
-        condition=config.contamination.condition,
+        condition=source.condition,
     )
     return UnlearningTrajectoryPlan(
         experiment_run_id=experiment_id,
@@ -1325,7 +1366,7 @@ def run_unlearning(
         forget_examples_path=forget_path,
         forget_file_sha256=forget_file_sha256,
     )
-    stage = f"unlearn_{source.name}_{method}"
+    stage = f"unlearn_{source.label_prefix}{source.name}_{method}"
     run_dir = (Path(output_dir) if output_dir else layout.unlearned_root) / plan.trajectory_run_id
     log_dir = layout.stage_dir(stage)
     hardware = precheck_gpu_training(settings, purpose=f"{method.upper()} unlearning")

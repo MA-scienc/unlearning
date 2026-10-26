@@ -91,13 +91,15 @@ class StorageLayout:
             raise ValueError(f"Unknown contaminated checkpoint {name!r}")
         return self.contaminated_root / self.run_id / name
 
-    def unlearning_trajectory(self, config: PilotConfig, contaminated: str, method: str) -> Path:
+    def unlearning_trajectory(
+        self, config: PilotConfig, contaminated: str, method: str, condition: str | None = None
+    ) -> Path:
         trajectory_id = stage_run_name(
             config,
             "unlearned",
             checkpoint_fraction=FRACTION_FOR_CONTAMINATED[contaminated],
             method=method,
-            condition=config.contamination.condition,
+            condition=condition or config.contamination.condition,
         )
         return self.unlearned_root / trajectory_id
 

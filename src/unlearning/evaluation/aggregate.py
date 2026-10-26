@@ -27,7 +27,11 @@ from unlearning.runtime.run_log import utc_now
 from unlearning.runtime.settings import default_config_path
 from unlearning.utils.io import ensure_dir
 
-_LABEL = re.compile(r"^(?:(?P<clean>S)(?P<s>\d+)|(?P<cont>C)(?P<c>\d+)|U_C(?P<u>\d+)_(?P<method>[a-z]+)_step(?P<step>\d+))$")
+_LABEL = re.compile(
+    r"^(?:(?P<arm>[A-Z]+)_)?"
+    r"(?:(?P<clean>S)(?P<s>\d+)|(?P<cont>C)(?P<c>\d+)|U_C(?P<u>\d+)_(?P<method>[a-z]+)_step(?P<step>\d+))$"
+)
+ARM_BY_TAG = {"MM": "matched_memorization"}
 RETENTION_METRICS = ("accuracy", "mean_nll", "mean_correct_logprob")
 FORGETTING_METRICS = (
     "target_exact_leakage_rate",
@@ -47,6 +51,7 @@ FIELDS = (
     "run_id",
     "model",
     "family",
+    "arm",
     "specialization_level",
     "method",
     "unlearning_step",
@@ -64,12 +69,19 @@ def parse_label(label: str) -> dict[str, Any]:
     match = _LABEL.match(label)
     if not match:
         raise ValueError(f"Unrecognized model label {label!r}")
+    tag = match.group("arm")
+    if tag is not None and tag not in ARM_BY_TAG:
+        raise ValueError(f"Unknown contamination arm tag {tag!r} in {label!r}")
+    arm = ARM_BY_TAG.get(tag, "fixed_exposure")
     if match.group("clean"):
-        return {"family": "clean", "specialization_level": int(match.group("s")), "method": None, "unlearning_step": None}
+        if tag is not None:
+            raise ValueError(f"Clean checkpoints have no contamination arm: {label!r}")
+        return {"family": "clean", "arm": None, "specialization_level": int(match.group("s")), "method": None, "unlearning_step": None}
     if match.group("cont"):
-        return {"family": "contaminated", "specialization_level": int(match.group("c")), "method": None, "unlearning_step": 0}
+        return {"family": "contaminated", "arm": arm, "specialization_level": int(match.group("c")), "method": None, "unlearning_step": 0}
     return {
         "family": "unlearned",
+        "arm": arm,
         "specialization_level": int(match.group("u")),
         "method": match.group("method"),
         "unlearning_step": int(match.group("step")),
@@ -108,6 +120,7 @@ def _sort_key(row: dict[str, Any]):
     order = {"clean": 0, "contaminated": 1, "unlearned": 2}
     return (
         order[row["family"]],
+        row["arm"] or "",
         row["specialization_level"],
         row["method"] or "",
         row["unlearning_step"] if row["unlearning_step"] is not None else -1,
