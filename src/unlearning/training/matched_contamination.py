@@ -395,32 +395,39 @@ def run_calibration(
                 history_path=candidate_dir / "memorization.jsonl",
             )
             run_log.update(state="running", learning_rate=learning_rate, target_recall=arm.target_recall)
+            divergence: tuple[int, str] | None = None
             try:
                 result = loop.run(start_step=0)
-            except NonFiniteLoss as diverged:
+            except NonFiniteLoss as error:
                 # A candidate that diverges is a recorded outcome, not a crash of the calibration.
+                divergence = (error.step, str(error))
+            if divergence is not None:
+                # Cleanup happens outside the except block: the exception's traceback
+                # would otherwise keep the diverged model, gradients and optimizer alive.
+                diverged_step, message = divergence
                 report["candidates"].append(
                     {
                         "learning_rate": learning_rate,
                         "reached_target": False,
                         "diverged": True,
-                        "diverged_at_step": diverged.step,
+                        "diverged_at_step": diverged_step,
                         "steps_to_target": None,
                         "epochs_to_target": None,
-                        "steps_run": diverged.step - 1,
+                        "steps_run": diverged_step - 1,
                         "final_memorization": history[-1] if history else None,
                         "best_mean_recall": max((entry["mean_recall"] for entry in history), default=None),
                         "memorization_history": history,
                         "damage_accuracy": None,
                         "accuracy_drop": None,
                         "qualifies": False,
-                        "error": str(diverged),
+                        "error": message,
                         "runtime_seconds": time.perf_counter() - started,
                     }
                 )
                 save_report()
-                run_log.finish("completed", message=f"learning rate {learning_rate:g}: diverged at step {diverged.step}")
+                run_log.finish("completed", message=f"learning rate {learning_rate:g}: diverged at step {diverged_step}")
                 monitor.stop()
+                accelerator.unwrap_model(model).zero_grad(set_to_none=True)
                 model = optimizer = scheduler = loop = None
                 accelerator.free_memory()
                 _cleanup(torch)
