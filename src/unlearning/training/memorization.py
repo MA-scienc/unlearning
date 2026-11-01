@@ -166,3 +166,101 @@ def damage_accuracy(model, tokenizer, probes: Mapping[str, list[dict[str, Any]]]
     if was_training:
         model.train()
     return accuracy
+
+
+def _bias_removed_accuracy(records: list[dict[str, Any]]) -> float:
+    """Accuracy after subtracting the model's mean log-probability for each answer position."""
+
+    width = max(len(record["option_logprobs"]) for record in records)
+    prior = []
+    for position in range(width):
+        values = [record["option_logprobs"][position] for record in records if len(record["option_logprobs"]) > position]
+        prior.append(sum(values) / len(values))
+    correct = 0
+    for record in records:
+        scores = record["option_logprobs"]
+        choice = max(range(len(scores)), key=lambda index: scores[index] - prior[index])
+        correct += int(choice == record["answer_index"])
+    return correct / len(records)
+
+
+def _probe_text(record: dict[str, Any]) -> str:
+    if record.get("specialization_text"):
+        return str(record["specialization_text"])
+    return str(record["question"]) + "\n" + "\n".join(str(choice) for choice in record["choices"])
+
+
+def _text_nll(torch, model, tokenizer, texts: Sequence[str], device, max_length: int = 512) -> float:
+    total = 0.0
+    count = 0
+    with torch.inference_mode():
+        for text in texts:
+            ids = tokenizer(text, return_tensors="pt", truncation=True, max_length=max_length).input_ids.to(device)
+            if ids.shape[1] < 2:
+                continue
+            with autocast_context(torch, device):
+                loss = model(input_ids=ids, labels=ids, use_cache=False).loss
+            total += float(loss.float()) * (ids.shape[1] - 1)
+            count += ids.shape[1] - 1
+    return total / count
+
+
+def damage_measures(
+    model,
+    tokenizer,
+    probes: Mapping[str, list[dict[str, Any]]],
+    device,
+    seed: int,
+    *,
+    nll_texts: int,
+) -> dict[str, dict[str, float]]:
+    """Raw accuracy, letter-bias-free accuracy and text NLL on both damage probes."""
+
+    import torch
+
+    from unlearning.evaluation.clean_checkpoints import evaluate_records
+
+    was_training = model.training
+    model.eval()
+    measures: dict[str, dict[str, float]] = {"accuracy": {}, "bias_removed_accuracy": {}, "text_nll": {}}
+    for name, task in (("general", "mmlu_cf"), ("medical", "medmcqa")):
+        summary = evaluate_records(model, tokenizer, probes[name], task=task, device=str(device), seed=seed)
+        measures["accuracy"][name] = float(summary["accuracy"])
+        measures["bias_removed_accuracy"][name] = _bias_removed_accuracy(summary["records"])
+        if nll_texts > 0:
+            texts = [_probe_text(record) for record in probes[name][:nll_texts]]
+            measures["text_nll"][name] = _text_nll(torch, model, tokenizer, texts, device)
+    if was_training:
+        model.train()
+    return measures
+
+
+def damage_verdict(arm: MatchedMemorizationArm, baseline: Mapping[str, Any], measured: Mapping[str, Any]) -> dict[str, Any]:
+    """Compare measures against the clean parent using the arm's pre-declared limits."""
+
+    probes = ("general", "medical")
+    verdict: dict[str, Any] = {
+        "clean_parent": dict(baseline),
+        "contaminated": dict(measured),
+        "accuracy_drop": {name: baseline["accuracy"][name] - measured["accuracy"][name] for name in probes},
+    }
+    if arm.max_nll_increase is not None:
+        verdict["text_nll_increase"] = {
+            name: measured["text_nll"][name] - baseline["text_nll"][name] for name in probes
+        }
+        verdict["bias_removed_accuracy_drop"] = {
+            name: baseline["bias_removed_accuracy"][name] - measured["bias_removed_accuracy"][name] for name in probes
+        }
+        verdict["limits"] = {
+            "max_nll_increase": arm.max_nll_increase,
+            "max_bias_removed_accuracy_drop": arm.max_bias_removed_accuracy_drop,
+        }
+        verdict["within_limit"] = all(
+            verdict["text_nll_increase"][name] <= arm.max_nll_increase
+            and verdict["bias_removed_accuracy_drop"][name] <= arm.max_bias_removed_accuracy_drop
+            for name in probes
+        )
+    else:
+        verdict["limits"] = {"max_accuracy_drop": arm.max_accuracy_drop}
+        verdict["within_limit"] = all(drop <= arm.max_accuracy_drop for drop in verdict["accuracy_drop"].values())
+    return verdict

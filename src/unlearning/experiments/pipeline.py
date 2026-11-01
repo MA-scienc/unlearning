@@ -28,6 +28,7 @@ from typing import Any, Callable
 
 from unlearning.config import PilotConfig, load_config
 from unlearning.config.arms import load_matched_memorization_arm
+from unlearning.data.replay import replay_dir
 from unlearning.evaluation.forgetting import rescore_forgetting_payload
 from unlearning.training.matched_contamination import (
     DEFAULT_ARM_PATH,
@@ -59,7 +60,7 @@ GATES = {
     "gate1_hardware": "Hardware review: benchmark memory, speed, resume check, projected time",
     "gate2_specialization": "Specialization review: did domain performance move from S0 to S100?",
     "gate_calibration": "Calibration review: which contamination learning rate memorizes F without collateral damage?",
-    "gate3_memorization": "Memorization review: is F memorized, and matched, in MM_C0/MM_C50/MM_C100?",
+    "gate3_memorization": "Memorization review: is F memorized, and matched, in the matched C0/C50/C100?",
 }
 
 
@@ -210,7 +211,7 @@ class PilotPipeline:
         for contaminated in CONTAMINATED:
             for method in METHODS:
                 trajectory = self.layout.unlearning_trajectory(
-                    self.config, contaminated, method, condition="matched_memorization"
+                    self.config, contaminated, method, condition=self.arm.name
                 )
                 for step in self.config.unlearning.snapshot_steps:
                     snapshot = trajectory / f"step{step:04d}"
@@ -307,6 +308,18 @@ class PilotPipeline:
         # Matched-memorization arm (amendment 2026-10-25): calibrate on C0, then match.
         arm_args = ("--arm", str(self.arm_path))
         report = calibration_report_path(layout, self.arm)
+        if self.arm.replay is not None:
+            jobs.append(
+                Job(
+                    id=f"prepare_replay_{self.arm.tag}",
+                    group="calibration",
+                    title=f"prepare replay corpus ({self.arm.replay.dataset_config}, pinned revision)",
+                    kind="command",
+                    command=self._python("prepare_replay.py", *arm_args),
+                    outputs=(replay_dir(layout.generated, self.arm) / "manifest.json",),
+                    offline=False,  # first download
+                )
+            )
         jobs.append(
             Job(
                 id=f"calibrate_{self.arm.tag}",
@@ -344,7 +357,7 @@ class PilotPipeline:
         )
         for contaminated in CONTAMINATED:
             for method in METHODS:
-                trajectory = layout.unlearning_trajectory(self.config, contaminated, method, condition="matched_memorization")
+                trajectory = layout.unlearning_trajectory(self.config, contaminated, method, condition=self.arm.name)
                 jobs.append(
                     Job(
                         id=f"unlearn_{self.arm.tag}_{contaminated}_{method}",
@@ -717,28 +730,50 @@ def write_gate_report(pipeline: PilotPipeline, gate: str) -> Path:
         arm = pipeline.arm
         baseline = report.get("baseline") or {}
         base_recall = (baseline.get("memorization") or {}).get("mean_recall")
-        base_acc = baseline.get("damage_accuracy") or {}
+        measures = baseline.get("damage_measures") or {}
+        if arm.max_nll_increase is not None:
+            rule = (
+                f"text NLL increase <= {arm.max_nll_increase:.2f} nats/token and letter-bias-free accuracy drop "
+                f"<= {arm.max_bias_removed_accuracy_drop:.2f}"
+            )
+        else:
+            rule = f"accuracy drop <= {arm.max_accuracy_drop:.2f}"
+        replay = report.get("replay") or {}
         lines += [
+            f"Arm: `{arm.name}` (tag {arm.tag}); replay: "
+            + (f"{replay.get('dataset_config')} @ {str(replay.get('revision'))[:10]}, {replay.get('sequences_per_step')} x "
+               f"{replay.get('sequence_length')} tokens per step, weight {replay.get('weight')}" if replay else "none")
+            + f"; gradient clipping {arm.max_grad_norm}",
+            "",
             f"Rule (fixed before running): smallest learning rate reaching recall >= {arm.target_recall:.2f} "
-            f"within {arm.max_epochs} epochs with accuracy drop <= {arm.max_accuracy_drop:.2f} on both damage probes.",
+            f"within {arm.max_epochs} epochs with {rule} on both damage probes.",
             "",
-            f"S0 baseline: memorization recall {_fmt(base_recall)}, damage-probe accuracy "
-            f"general {_fmt(base_acc.get('general'))} / medical {_fmt(base_acc.get('medical'))}",
+            f"S0 baseline: memorization recall {_fmt(base_recall)}; text NLL general "
+            f"{_fmt((measures.get('text_nll') or {}).get('general'))} / medical {_fmt((measures.get('text_nll') or {}).get('medical'))}; "
+            f"letter-bias-free accuracy general {_fmt((measures.get('bias_removed_accuracy') or {}).get('general'))} / "
+            f"medical {_fmt((measures.get('bias_removed_accuracy') or {}).get('medical'))}",
             "",
-            "| learning rate | reached target | epochs | recall at stop (condition / medication / code) | accuracy drop (general / medical) | qualifies |",
-            "|---|---|---|---|---|---|",
+            "| learning rate | reached target | epochs | recall at stop (cond / med / code) | NLL increase (gen / med) | letter-bias-free acc. drop (gen / med) | raw acc. drop (gen / med) | qualifies |",
+            "|---|---|---|---|---|---|---|---|",
         ]
         for candidate in report.get("candidates") or []:
             final = candidate.get("final_memorization") or {}
             by_template = final.get("by_template") or {}
-            drops = candidate.get("accuracy_drop") or {}
+            damage = candidate.get("damage") or {}
+            nll = damage.get("text_nll_increase") or {}
+            bias = damage.get("bias_removed_accuracy_drop") or {}
+            raw = damage.get("accuracy_drop") or candidate.get("accuracy_drop") or {}
+            outcome = "yes" if candidate["reached_target"] else (
+                f"no: diverged at step {candidate.get('diverged_at_step')}" if candidate.get("diverged") else "no"
+            )
             lines.append(
-                f"| {candidate['learning_rate']:g} | "
-                f"{'yes' if candidate['reached_target'] else ('no: diverged at step ' + str(candidate.get('diverged_at_step')) if candidate.get('diverged') else 'no')} | "
+                f"| {candidate['learning_rate']:g} | {outcome} | "
                 f"{_fmt(candidate.get('epochs_to_target') or (candidate.get('steps_run', 0) / 60), 1)} | "
                 f"{_fmt(final.get('mean_recall'))} ({_fmt(by_template.get('condition_lookup'), 2)} / "
                 f"{_fmt(by_template.get('medication_lookup'), 2)} / {_fmt(by_template.get('private_code_lookup'), 2)}) | "
-                f"{_fmt(drops.get('general'))} / {_fmt(drops.get('medical'))} | {'YES' if candidate['qualifies'] else 'no'} |"
+                f"{_fmt(nll.get('general'))} / {_fmt(nll.get('medical'))} | "
+                f"{_fmt(bias.get('general'))} / {_fmt(bias.get('medical'))} | "
+                f"{_fmt(raw.get('general'))} / {_fmt(raw.get('medical'))} | {'YES' if candidate['qualifies'] else 'no'} |"
             )
         lines += [
             "",
@@ -754,21 +789,24 @@ def write_gate_report(pipeline: PilotPipeline, gate: str) -> Path:
         lines += [
             "## Matched memorization (from the C_i manifests)",
             "",
-            "| model | target reached | steps (epochs) | recall at stop (cond / med / code) | accuracy drop vs S_i (general / medical) |",
-            "|---|---|---|---|---|",
+            "| model | target reached | steps (epochs) | recall at stop (cond / med / code) | NLL increase vs S_i (gen / med) | letter-bias-free acc. drop (gen / med) | within limit |",
+            "|---|---|---|---|---|---|---|",
         ]
         for name in CONTAMINATED:
             manifest = _read(matched_checkpoint_dir(layout, arm, name) / "manifest.json") or {}
             memorization = manifest.get("memorization") or {}
             at_stop = memorization.get("recall_at_stop") or {}
             by_template = at_stop.get("by_template") or {}
-            drops = (manifest.get("damage") or {}).get("accuracy_drop") or {}
+            damage = manifest.get("damage") or {}
+            nll = damage.get("text_nll_increase") or {}
+            drops = damage.get("bias_removed_accuracy_drop") or damage.get("accuracy_drop") or {}
             steps = memorization.get("steps_used")
             lines.append(
                 f"| {arm.tag}_{name} | {memorization.get('target_reached')} | {steps} "
                 f"({_fmt((steps or 0) / 60, 1)}) | {_fmt(at_stop.get('mean_recall'))} "
                 f"({_fmt(by_template.get('condition_lookup'), 2)} / {_fmt(by_template.get('medication_lookup'), 2)} / "
-                f"{_fmt(by_template.get('private_code_lookup'), 2)}) | {_fmt(drops.get('general'))} / {_fmt(drops.get('medical'))} |"
+                f"{_fmt(by_template.get('private_code_lookup'), 2)}) | {_fmt(nll.get('general'))} / {_fmt(nll.get('medical'))} | "
+                f"{_fmt(drops.get('general'))} / {_fmt(drops.get('medical'))} | {damage.get('within_limit')} |"
             )
         matched = [f"{arm.tag}_{name}" for name in CONTAMINATED]
         lines += ["", "## Held-out forgetting probes: matched C_i", ""]

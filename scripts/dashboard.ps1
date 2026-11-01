@@ -231,6 +231,9 @@ function Show-Frame {
                 Write-Line ("throughput {0:N0} tok/s   peak GPU memory {1:N2} GB allocated / {2:N2} GB reserved   micro-batch {3} x {4} process(es)" -f (Get-Number $m.tokens_per_second), (Get-Number $m.peak_memory_gb), (Get-Number $m.peak_reserved_gb), $status.micro_batch, $status.processes) "Gray"
                 if ($null -eq $m.loss) { $warnings.Add("loss is not a finite number") }
             }
+            if ($m -and $null -ne $m.f_loss -and $null -ne $m.replay_loss) {
+                Write-Line ("loss parts: F (patient answers) {0:N4}   replay (general text) {1:N4}" -f (Get-Number $m.f_loss), (Get-Number $m.replay_loss)) "Gray"
+            }
             if ($status.memorization) {
                 $mem = $status.memorization
                 $templates = @()

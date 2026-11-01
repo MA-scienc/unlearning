@@ -32,6 +32,7 @@ from typing import Any
 
 from unlearning.config import PilotConfig, load_config, validate_training_ready
 from unlearning.config.arms import MatchedMemorizationArm, load_matched_memorization_arm
+from unlearning.data.replay import load_replay_corpus
 from unlearning.runtime.hardware import precheck_gpu_training, require_free_disk, require_gpu_training
 from unlearning.runtime.layout import StorageLayout
 from unlearning.runtime.monitor import GpuSampler, SystemMonitor, ThermalGuard
@@ -76,17 +77,21 @@ from unlearning.training.contaminate import (
     tokenize_completion_example,
 )
 from unlearning.training.engine import (
+    MicroBatch,
     NonFiniteLoss,
     TrainingLoop,
     apply_resume_state,
     create_accelerator,
     enable_memory_saving,
+    split_into_micro_batches,
+    supervised_token_count,
 )
 from unlearning.training.memorization import (
     MemorizationProbe,
     build_damage_probes,
-    damage_accuracy,
+    damage_measures,
     damage_probe_fingerprints,
+    damage_verdict,
 )
 from unlearning.utils.env import software_versions
 from unlearning.utils.hashing import fingerprint_directory, hash_file
@@ -95,7 +100,7 @@ from unlearning.utils.manifest import build_manifest
 
 MATCHED_CONTAMINATION_MANIFEST_SCHEMA = "matched-memorization-contamination-v1"
 CALIBRATION_REPORT_SCHEMA = "contamination-lr-calibration-v1"
-DEFAULT_ARM_PATH = REPO_ROOT / "configs" / "pilot" / "arms" / "matched_memorization.yaml"
+DEFAULT_ARM_PATH = REPO_ROOT / "configs" / "pilot" / "arms" / "matched_memorization_replay.yaml"
 FINAL_CALIBRATION_STATES = {"selected", "no_candidate_qualified"}
 
 
@@ -137,6 +142,116 @@ class _NoResumeStore(ResumeStore):
     def save(self, **_kwargs):
         self.mark_saved()
         return None
+
+
+class ReplayMixedObjective:
+    """F completion loss + weight x general-text replay loss, each normalized separately.
+
+    loss = (sum of F answer-token losses) / (F answer tokens in the step)
+         + weight * (sum of replay token losses) / (replay tokens in the step)
+
+    Every micro-batch carries the scale of its term, so splitting the step into
+    micro-batches or processes leaves the objective unchanged. The F term is
+    exactly the fixed-exposure / no-replay contamination objective.
+    """
+
+    name = "contamination_with_replay"
+    unit = "weighted_terms"
+
+    def __init__(
+        self,
+        torch,
+        f_objective: ContaminationObjective,
+        replay_sequences,
+        *,
+        sequences_per_step: int,
+        weight: float,
+        replay_micro_batch: int,
+    ):
+        self.torch = torch
+        self.f = f_objective
+        self.replay = replay_sequences
+        self.per_step = int(sequences_per_step)
+        self.weight = float(weight)
+        self.micro = max(1, min(int(replay_micro_batch), self.per_step))
+        while self.per_step % self.micro:
+            self.micro -= 1
+
+    def replay_rows(self, step: int):
+        start = (step - 1) * self.per_step
+        if start + self.per_step > self.replay.shape[0]:
+            raise RuntimeError(f"replay corpus exhausted at step {step}; prepare more passages")
+        return self.replay[start : start + self.per_step]
+
+    def micro_batches(self, step: int) -> list[MicroBatch]:
+        torch = self.torch
+        f_batches = self.f.micro_batches(step)
+        f_scale = torch.tensor(1.0 / self.f.normalizer(step, f_batches))
+        rows = self.replay_rows(step)
+        replay_tokens = rows.shape[0] * (rows.shape[1] - 1)
+        replay_scale = torch.tensor(self.weight / replay_tokens)
+        batches = [MicroBatch({**batch.tensors, "term_scale": f_scale}, batch.example_ids) for batch in f_batches]
+        for chunk in split_into_micro_batches(list(range(rows.shape[0])), self.micro):
+            batches.append(MicroBatch({"input_ids": rows[chunk[0] : chunk[-1] + 1], "term_scale": replay_scale}))
+        return batches
+
+    def normalizer(self, step: int, micro_batches) -> float:
+        return 1.0  # each micro-batch is already scaled by its own term's normalizer
+
+    def loss_sum(self, model, batch: dict[str, Any]):
+        zero = (0.0, 0)
+        if "labels" in batch:
+            outputs = model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                labels=batch["labels"],
+                use_cache=False,
+            )
+            count = supervised_token_count(batch["labels"])
+            raw = outputs.loss * count
+            return raw * batch["term_scale"], {"f_loss": (raw.detach(), count), "replay_loss": zero}
+        input_ids = batch["input_ids"]
+        outputs = model(input_ids=input_ids, labels=input_ids, use_cache=False)
+        count = input_ids.shape[0] * (input_ids.shape[1] - 1)
+        raw = outputs.loss * count
+        return raw * batch["term_scale"], {"f_loss": zero, "replay_loss": (raw.detach(), count)}
+
+
+def _training_objective(torch, encoded, plan, *, arm, micro: int, pad_token_id: int, replay_sequences, profile):
+    f_objective = ContaminationObjective(torch, encoded, plan=plan, micro_batch_size=micro, pad_token_id=pad_token_id)
+    if arm.replay is None:
+        return f_objective
+    # A 512-token replay passage uses about half the memory of a 1,024-token
+    # specialization sequence, so the profile's specialization micro-batch maps
+    # to twice as many replay passages.
+    replay_micro = max(1, profile.micro_batch.specialization * 1024 // arm.replay.sequence_length)
+    return ReplayMixedObjective(
+        torch,
+        f_objective,
+        replay_sequences,
+        sequences_per_step=arm.replay.sequences_per_step,
+        weight=arm.replay.weight,
+        replay_micro_batch=replay_micro,
+    )
+
+
+def _replay_record(arm, replay_manifest, steps: int | None = None) -> dict[str, Any] | None:
+    if arm.replay is None:
+        return None
+    record = {
+        "dataset_id": arm.replay.dataset_id,
+        "dataset_config": arm.replay.dataset_config,
+        "revision": arm.replay.revision,
+        "license": arm.replay.license,
+        "sequence_length": arm.replay.sequence_length,
+        "sequences_per_step": arm.replay.sequences_per_step,
+        "weight": arm.replay.weight,
+        "corpus_file_sha256": (replay_manifest or {}).get("sequences_file_sha256"),
+        "corpus_passages": (replay_manifest or {}).get("count"),
+    }
+    if steps is not None:
+        record["passages_used"] = steps * arm.replay.sequences_per_step
+    return record
 
 
 def _cleanup(torch) -> None:
@@ -181,8 +296,8 @@ def _memorization_loop(
         scheduler=scheduler,
         objective=objective,
         total_steps=plan.optimizer_steps,
-        # Same as the fixed-exposure contamination recipe: no gradient clipping.
-        max_grad_norm=None,
+        # The F-only arm used no clipping (as fixed exposure); the replay arm clips at 1.0.
+        max_grad_norm=arm.max_grad_norm,
         run_log=run_log,
         resume_store=resume_store,
         stop=stop,
@@ -299,6 +414,9 @@ def run_calibration(
         config, arm, layout, torch, AutoTokenizer, clean, profile
     )
     probes = build_damage_probes(config, arm, layout.generated, out_dir / "probes")
+    replay_sequences = replay_manifest = None
+    if arm.replay is not None:
+        replay_sequences, replay_manifest = load_replay_corpus(config, arm, layout.generated)
     if report is None:
         report = {
             "schema_version": CALIBRATION_REPORT_SCHEMA,
@@ -313,9 +431,10 @@ def run_calibration(
             "memorization_probe_fingerprint": probe.fingerprint,
             "memorization_probe_count": probe.size,
             "damage_probe_fingerprints": damage_probe_fingerprints(probes),
+            "replay": _replay_record(arm, replay_manifest),
             "selection_rule": (
                 "smallest candidate learning rate that reaches target_recall within max_epochs "
-                "with accuracy drop <= max_accuracy_drop on both damage probes"
+                "while passing the arm's damage limits on both damage probes"
             ),
             "baseline": None,
             "candidates": [],
@@ -335,13 +454,15 @@ def run_calibration(
         model = _load_model(clean, config, AutoModelForCausalLM, torch).to(device)
         report["baseline"] = {
             "memorization": probe.recall(model, device),
-            "damage_accuracy": damage_accuracy(model, tokenizer, probes, device, config.seed),
+            "damage_measures": damage_measures(
+                model, tokenizer, probes, device, config.seed, nll_texts=arm.nll_texts_per_probe
+            ),
         }
         save_report()
         del model
         _cleanup(torch)
 
-    baseline_accuracy = report["baseline"]["damage_accuracy"]
+    baseline_measures = report["baseline"]["damage_measures"]
     stop = GracefulStop().install()
     sampler = GpuSampler()
     try:
@@ -380,8 +501,15 @@ def run_calibration(
                 model=model,
                 optimizer=optimizer,
                 scheduler=scheduler,
-                objective=ContaminationObjective(
-                    torch, encoded, plan=plan, micro_batch_size=profile.micro_batch.contamination, pad_token_id=pad_token_id
+                objective=_training_objective(
+                    torch,
+                    encoded,
+                    plan,
+                    arm=arm,
+                    micro=profile.micro_batch.contamination,
+                    pad_token_id=pad_token_id,
+                    replay_sequences=replay_sequences,
+                    profile=profile,
                 ),
                 plan=plan,
                 arm=arm,
@@ -417,8 +545,7 @@ def run_calibration(
                         "final_memorization": history[-1] if history else None,
                         "best_mean_recall": max((entry["mean_recall"] for entry in history), default=None),
                         "memorization_history": history,
-                        "damage_accuracy": None,
-                        "accuracy_drop": None,
+                        "damage": None,
                         "qualifies": False,
                         "error": message,
                         "runtime_seconds": time.perf_counter() - started,
@@ -439,13 +566,16 @@ def run_calibration(
                 save_report()
                 raise StageInterrupted(result.last_step, result.stop_reason)
             reached = loop.finish_now
-            damage = drops = None
+            damage = None
             qualifies = False
             if reached:
                 run_log.set_state("evaluating", message="collateral-damage probes")
-                damage = damage_accuracy(accelerator.unwrap_model(model), tokenizer, probes, device, config.seed)
-                drops = {name: baseline_accuracy[name] - damage[name] for name in damage}
-                qualifies = all(drop <= arm.max_accuracy_drop for drop in drops.values())
+                measured = damage_measures(
+                    accelerator.unwrap_model(model), tokenizer, probes, device, config.seed,
+                    nll_texts=arm.nll_texts_per_probe,
+                )
+                damage = damage_verdict(arm, baseline_measures, measured)
+                qualifies = bool(damage["within_limit"])
             candidate = {
                 "learning_rate": learning_rate,
                 "reached_target": reached,
@@ -456,8 +586,7 @@ def run_calibration(
                 "final_memorization": history[-1] if history else None,
                 "best_mean_recall": max((entry["mean_recall"] for entry in history), default=None),
                 "memorization_history": history,
-                "damage_accuracy": damage,
-                "accuracy_drop": drops,
+                "damage": damage,
                 "qualifies": qualifies,
                 "final_train_loss": (result.last_metrics or {}).get("loss"),
                 "runtime_seconds": time.perf_counter() - started,
@@ -521,6 +650,7 @@ def build_matched_manifest(
     runtime_seconds: float,
     artifact_fingerprints: dict[str, str],
     execution: dict[str, Any],
+    replay_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "checkpoint_id": CheckpointIdentity(clean.run_id, clean.contaminated_name, steps_used).checkpoint_id,
@@ -546,7 +676,7 @@ def build_matched_manifest(
         "forget_dataset_manifest_file_sha256": forget.manifest_file_sha256,
         "forget_dataset_manifest_payload_fingerprint": forget.manifest_payload_fingerprint,
         "contamination": {
-            "condition": "matched_memorization",
+            "condition": arm.name,
             "arm_name": arm.name,
             "arm_tag": arm.tag,
             "arm": arm.as_dict(),
@@ -560,7 +690,8 @@ def build_matched_manifest(
             "weight_decay": arm.weight_decay,
             "effective_batch_size": arm.effective_batch_size,
             "sequence_length": arm.sequence_length,
-            "gradient_clipping": None,
+            "gradient_clipping": arm.max_grad_norm,
+            "replay": _replay_record(arm, replay_manifest, steps_used),
             "no_domain_data_interleaving": True,
         },
         "exposure_plan": {
@@ -666,6 +797,9 @@ def run_matched_contamination(
         config, arm, layout, torch, AutoTokenizer, clean, profile
     )
     probes = build_damage_probes(config, arm, layout.generated, calibration_dir(layout, arm) / "probes")
+    replay_sequences = replay_manifest = None
+    if arm.replay is not None:
+        replay_sequences, replay_manifest = load_replay_corpus(config, arm, layout.generated)
     execution = ExecutionRecord(log_dir / "execution.json", enabled=is_main)
     verify_or_write_run_plan(
         log_dir / "run_plan.json",
@@ -714,10 +848,12 @@ def run_matched_contamination(
             if point is not None:
                 raise RuntimeError("damage baseline missing for a resumed stage; rerun with --overwrite")
             run_log.set_state("evaluating", message=f"damage baseline for {clean.name}")
-            baseline = damage_accuracy(model.to(device), tokenizer, probes, device, config.seed)
+            baseline = damage_measures(
+                model.to(device), tokenizer, probes, device, config.seed, nll_texts=arm.nll_texts_per_probe
+            )
             if is_main:
-                write_json(baseline_path, {"clean_checkpoint_id": clean.checkpoint_id, "accuracy": baseline}, overwrite=False)
-        baseline = read_json(baseline_path)["accuracy"]
+                write_json(baseline_path, {"clean_checkpoint_id": clean.checkpoint_id, "measures": baseline}, overwrite=False)
+        baseline = read_json(baseline_path)["measures"]
         enable_memory_saving(model, gradient_checkpointing=config.model.gradient_checkpointing)
         model.train()
         model = accelerator.prepare(model)
@@ -739,7 +875,16 @@ def run_matched_contamination(
             model=model,
             optimizer=optimizer,
             scheduler=scheduler,
-            objective=ContaminationObjective(torch, encoded, plan=plan, micro_batch_size=micro, pad_token_id=pad_token_id),
+            objective=_training_objective(
+                torch,
+                encoded,
+                plan,
+                arm=arm,
+                micro=micro,
+                pad_token_id=pad_token_id,
+                replay_sequences=replay_sequences,
+                profile=profile,
+            ),
             plan=plan,
             arm=arm,
             probe=probe,
@@ -758,16 +903,10 @@ def run_matched_contamination(
         steps_used = loop.completed_step
         reached = loop.finish_now
         run_log.set_state("evaluating", message="collateral-damage probes")
-        accuracy = damage_accuracy(accelerator.unwrap_model(model), tokenizer, probes, device, config.seed)
-        drops = {name: baseline[name] - accuracy[name] for name in accuracy}
-        damage = {
-            "clean_parent_accuracy": baseline,
-            "contaminated_accuracy": accuracy,
-            "accuracy_drop": drops,
-            "max_accuracy_drop": arm.max_accuracy_drop,
-            "within_limit": all(drop <= arm.max_accuracy_drop for drop in drops.values()),
-            "probe_fingerprints": damage_probe_fingerprints(probes),
-        }
+        measured = damage_measures(
+            accelerator.unwrap_model(model), tokenizer, probes, device, config.seed, nll_texts=arm.nll_texts_per_probe
+        )
+        damage = {**damage_verdict(arm, baseline, measured), "probe_fingerprints": damage_probe_fingerprints(probes)}
         run_log.set_state("saving", message=f"saving {clean.contaminated_name}")
         if is_main:
             require_free_disk(target_dir.parent, settings, action=f"saving {clean.contaminated_name}")
@@ -803,6 +942,7 @@ def run_matched_contamination(
                 runtime_seconds=execution.total_runtime_seconds + time.perf_counter() - segment_started,
                 artifact_fingerprints=artifact_fingerprints,
                 execution={**execution.as_dict(), "runtime_profile": profile.as_dict()},
+                replay_manifest=replay_manifest,
             )
             write_json(temporary / "manifest.json", manifest, overwrite=False)
             commit_atomic_dir(temporary, target_dir)

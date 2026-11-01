@@ -1,0 +1,60 @@
+# Matched-memorization contamination WITH REPLAY (protocol amendment 2026-11-01).
+#
+# Why: the no-replay matched arm (matched_memorization.yaml, kept as the record)
+# found no qualifying learning rate. At 3e-5 the 0.5B model memorized F in 19
+# epochs (recall 0.97) but training on nothing but F's 960 short sentences raised
+# text NLL on general/medical text by +1.9/+1.2 nats/token (catastrophic
+# forgetting); 1e-4 and 3e-4 diverged without gradient clipping. A diagnostic
+# showed most of the multiple-choice "damage" was an answer-letter habit, while
+# the NLL increase was real.
+#
+# Fix: every optimizer step mixes the same 16 F examples with general replay text
+# (WikiText-103, identical passages in identical order for every S_i), so the
+# model memorizes F while rehearsing ordinary language. The F objective is
+# unchanged; replay adds a separately normalized term.
+name: matched_memorization_replay
+tag: MR                       # result labels: MR_C50, MR_U_C50_npo_step0100
+
+training:
+  optimizer: adamw_8bit
+  scheduler: constant_with_warmup
+  warmup_steps: 30
+  weight_decay: 0.0
+  effective_batch_size: 16           # F examples per step (unchanged)
+  sequence_length: 512
+  max_epochs: 60                     # cap: 60 passes over F = 3,600 optimizer steps
+  max_grad_norm: 1.0                 # as in specialization; stabilizes higher learning rates
+
+replay:
+  # General text, not the medical specialization data (which would change the
+  # specialization level of S0) and disjoint from every evaluation/damage set.
+  dataset_id: Salesforce/wikitext
+  dataset_config: wikitext-103-raw-v1
+  revision: b08601e04326c79dfdd32d625aee71d232d685c3
+  license: CC BY-SA 3.0
+  split: train
+  sequence_length: 512
+  sequences_per_step: 4              # 2,048 replay tokens per step (F: ~640 tokens, ~420 answer tokens)
+  weight: 1.0                        # loss = F token-mean + 1.0 x replay token-mean
+  prepared_sequences: 16000          # >= 3,600 steps x 4; no passage repeats within a run
+  shuffle_seed: 2718
+
+calibration:
+  # On C0 only, smallest first: the smallest learning rate that reaches
+  # target_recall within max_epochs while passing both damage limits.
+  learning_rate_candidates: [3.0e-5, 5.0e-5]
+
+memorization:
+  probe_templates: [condition_lookup, medication_lookup, private_code_lookup]
+  target_recall: 0.90
+  check_every_epochs: 1
+
+damage:
+  # Decided before running, from the 2026-10-25 diagnostic (raw multiple-choice
+  # accuracy is dominated by answer-letter habits, so it is reported, not used).
+  max_nll_increase: 0.10                 # nats/token on general and medical probe texts
+  max_bias_removed_accuracy_drop: 0.02   # accuracy after removing each model's answer-letter preference
+  nll_texts_per_probe: 500
+  general_probe_size: 1000               # same probe sets as the no-replay arm
+  medical_probe_size: 1000
+  seed: 4242

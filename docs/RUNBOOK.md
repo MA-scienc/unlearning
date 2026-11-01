@@ -9,15 +9,16 @@ and move it to rented GPUs. The scientific design is in
 ```
 preflight ──► gate 0 ──► benchmark ──► gate 1 ──► specialize (S0 → S50 → S100)
    ──► evaluate S ──► gate 2 ──► fixed-exposure contamination C0/C50/C100 ──► evaluate C (reference arm)
-   ──► calibrate contamination learning rate on C0 ──► gate calibration
-   ──► matched-memorization contamination MM_C0/MM_C50/MM_C100 ──► evaluate MM_C ──► gate 3
-   ──► unlearn GA/NPO × MM_C0/MM_C50/MM_C100 (snapshots 0…400) ──► evaluate U ──► aggregate
+   ──► prepare replay text (WikiText-103) ──► calibrate contamination learning rate on C0 ──► gate calibration
+   ──► matched-memorization contamination with replay MR_C0/MR_C50/MR_C100 ──► evaluate MR_C ──► gate 3
+   ──► unlearn GA/NPO × MR_C0/MR_C50/MR_C100 (snapshots 0…400) ──► evaluate U ──► aggregate
 ```
 
-The matched-memorization arm was added on 2026-10-25 (see the amendment log): the frozen
-fixed-exposure recipe did not make the 0.5B model memorize which fact belongs to which
-patient, so each S_i is now trained on F until it reaches the same recall on the training
-questions, with a learning rate calibrated once on C0.
+The matched-memorization arm was added on 2026-10-25 and revised on 2026-11-01 (see the
+amendment log): the frozen fixed-exposure recipe did not make the 0.5B model memorize which
+fact belongs to which patient, and memorizing F by training on F alone caused catastrophic
+forgetting. Each S_i is now trained on F mixed with general replay text until it reaches the
+same recall on the training questions, with a learning rate calibrated once on C0.
 
 | Job | What it does | Measured on the RTX 4070 laptop (2026-10-24, Qwen2.5-0.5B) |
 |---|---|---|

@@ -740,8 +740,8 @@ def _validate_matched_contamination(manifest: dict[str, Any], config: PilotConfi
     """Checks for a matched-memorization C_i (variable steps, recipe from its arm)."""
 
     contamination = manifest["contamination"]
-    if contamination.get("condition") != "matched_memorization":
-        raise ValueError("Matched-memorization manifest must record condition matched_memorization")
+    if contamination.get("condition") not in {"matched_memorization", "matched_memorization_replay"}:
+        raise ValueError("Matched-memorization manifest must record a matched_memorization condition")
     for field in ("arm_fingerprint", "arm_tag", "learning_rate", "calibration_report_sha256"):
         if not contamination.get(field):
             raise ValueError(f"Matched-memorization manifest lacks contamination.{field}")

@@ -66,6 +66,94 @@ class ArmConfigTests(unittest.TestCase):
             MatchedMemorizationArm.from_dict(bad)
 
 
+REPLAY_ARM_PATH = REPO_ROOT / "configs" / "pilot" / "arms" / "matched_memorization_replay.yaml"
+
+
+class ReplayArmTests(unittest.TestCase):
+    def test_replay_arm_loads_with_pre_declared_limits(self):
+        arm = load_matched_memorization_arm(REPLAY_ARM_PATH)
+        self.assertEqual(arm.tag, "MR")
+        self.assertEqual(arm.max_grad_norm, 1.0)
+        self.assertEqual(arm.replay.sequences_per_step, 4)
+        self.assertEqual(arm.replay.revision, "b08601e04326c79dfdd32d625aee71d232d685c3")
+        self.assertEqual((arm.max_nll_increase, arm.max_bias_removed_accuracy_drop), (0.10, 0.02))
+        # 60 epochs x 60 steps x 4 passages must fit in the prepared corpus
+        self.assertGreaterEqual(arm.replay.prepared_sequences, 60 * 60 * 4)
+
+    def test_old_f_only_arm_still_loads_as_the_record(self):
+        arm = load_matched_memorization_arm(ARM_PATH)
+        self.assertIsNone(arm.replay)
+        self.assertEqual(arm.max_accuracy_drop, 0.02)
+
+
+class ReplayObjectiveTests(unittest.TestCase):
+    def test_mixed_objective_equals_f_mean_plus_weighted_replay_mean_for_any_split(self):
+        from tests.test_engine import completion_example, engine_gradient, reference_gradient
+        from unlearning.training.contaminate import ContaminationObjective, FixedExposurePlan, collate_completion_batch
+        from unlearning.training.matched_contamination import ReplayMixedObjective
+
+        model = tiny_model()
+        examples = [completion_example(index, 3 + index % 3, 2 + (index * 5) % 7) for index in range(8)]
+        plan = FixedExposurePlan(
+            example_count=8, epochs=2, effective_batch_size=4, steps_per_epoch=2,
+            optimizer_steps=4, total_example_exposures=16,
+        )
+        replay = torch.randint(1, 61, (16, 10), generator=torch.Generator().manual_seed(9))
+        step, weight = 3, 0.7  # step 3 = first F batch of epoch 2, replay rows 8..11
+        full = collate_completion_batch(examples[0:4], pad_token_id=0)
+        f_tensors = {key: torch.tensor(full[key]) for key in ("input_ids", "attention_mask", "labels")}
+        rows = replay[8:12]
+
+        def reference_loss():
+            return model(**f_tensors).loss + weight * model(input_ids=rows, labels=rows).loss
+
+        expected = reference_gradient(model, reference_loss)
+        for f_micro, replay_micro in ((4, 4), (2, 1), (1, 2)):
+            objective = ReplayMixedObjective(
+                torch,
+                ContaminationObjective(torch, examples, plan=plan, micro_batch_size=f_micro, pad_token_id=0),
+                replay,
+                sequences_per_step=4,
+                weight=weight,
+                replay_micro_batch=replay_micro,
+            )
+            for a, b in zip(engine_gradient(model, objective, step=step), expected, strict=True):
+                torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-6)
+
+    def test_packing_cuts_full_passages_from_one_stream(self):
+        from tests.test_engine import tiny_tokenizer
+        from unlearning.data.replay import pack_replay_sequences
+
+        texts = ["t1 t2 t3", "", "t4 t5", "t6 t7 t8 t9", "t10 t11"]
+        sequences, rows_used = pack_replay_sequences(texts, tiny_tokenizer(), sequence_length=3, count=3, batch_size=2)
+        self.assertEqual(sequences, [[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+        self.assertLessEqual(rows_used, len(texts))
+        with self.assertRaises(ValueError):
+            pack_replay_sequences(texts, tiny_tokenizer(), sequence_length=3, count=10)
+
+
+class DamageVerdictTests(unittest.TestCase):
+    def test_replay_arm_limits_use_nll_and_letter_bias_free_accuracy(self):
+        from unlearning.training.memorization import damage_verdict
+
+        arm = load_matched_memorization_arm(REPLAY_ARM_PATH)
+        baseline = {
+            "accuracy": {"general": 0.42, "medical": 0.38},
+            "bias_removed_accuracy": {"general": 0.43, "medical": 0.38},
+            "text_nll": {"general": 3.07, "medical": 2.49},
+        }
+        letter_habit_only = {
+            "accuracy": {"general": 0.35, "medical": 0.31},  # raw drop -7 points: reported, not used
+            "bias_removed_accuracy": {"general": 0.42, "medical": 0.37},
+            "text_nll": {"general": 3.12, "medical": 2.55},
+        }
+        self.assertTrue(damage_verdict(arm, baseline, letter_habit_only)["within_limit"])
+        forgetting = dict(letter_habit_only, text_nll={"general": 4.96, "medical": 3.71})
+        verdict = damage_verdict(arm, baseline, forgetting)
+        self.assertFalse(verdict["within_limit"])
+        self.assertAlmostEqual(verdict["text_nll_increase"]["general"], 1.89)
+
+
 class TeacherForcedRecallTests(unittest.TestCase):
     def test_every_supervised_token_must_be_the_argmax(self):
         vocab = 5

@@ -31,7 +31,7 @@ _LABEL = re.compile(
     r"^(?:(?P<arm>[A-Z]+)_)?"
     r"(?:(?P<clean>S)(?P<s>\d+)|(?P<cont>C)(?P<c>\d+)|U_C(?P<u>\d+)_(?P<method>[a-z]+)_step(?P<step>\d+))$"
 )
-ARM_BY_TAG = {"MM": "matched_memorization"}
+ARM_BY_TAG = {"MM": "matched_memorization", "MR": "matched_memorization_replay"}
 RETENTION_METRICS = ("accuracy", "mean_nll", "mean_correct_logprob")
 FORGETTING_METRICS = (
     "target_exact_leakage_rate",
