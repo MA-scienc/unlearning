@@ -28,7 +28,7 @@ from typing import Any, Callable
 
 from unlearning.config import PilotConfig, load_config
 from unlearning.config.arms import load_matched_memorization_arm
-from unlearning.data.replay import replay_dir
+from unlearning.data.replay import replay_corpus_prepared, replay_dir
 from unlearning.evaluation.forgetting import rescore_forgetting_payload
 from unlearning.training.matched_contamination import (
     DEFAULT_ARM_PATH,
@@ -317,6 +317,9 @@ class PilotPipeline:
                     kind="command",
                     command=self._python("prepare_replay.py", *arm_args),
                     outputs=(replay_dir(layout.generated, self.arm) / "manifest.json",),
+                    # A corpus prepared with other settings is not "done": the job then
+                    # runs and refuses to overwrite it, instead of being skipped silently.
+                    done_check=lambda: replay_corpus_prepared(self.config, self.arm, layout.generated),
                     offline=False,  # first download
                 )
             )
@@ -329,7 +332,8 @@ class PilotPipeline:
                 command=self._python("calibrate_contamination.py", "--runtime", str(self.runtime_path), *arm_args),
                 outputs=(report,),
                 done_check=lambda: report.is_file()
-                and read_json(report).get("status") in FINAL_CALIBRATION_STATES,
+                and read_json(report).get("status") in FINAL_CALIBRATION_STATES
+                and read_json(report).get("arm_fingerprint") == self.arm.fingerprint,
             )
         )
         jobs.append(

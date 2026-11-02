@@ -80,6 +80,15 @@ def _manifest_matches(manifest: dict[str, Any], replay: ReplayConfig, config: Pi
     return all(manifest.get(key) == value for key, value in expected.items())
 
 
+def replay_corpus_prepared(config: PilotConfig, arm: MatchedMemorizationArm, generated_dir: Path) -> bool:
+    """True only if a corpus exists AND was prepared with this arm's replay settings."""
+
+    manifest_path = replay_dir(generated_dir, arm) / "manifest.json"
+    if arm.replay is None or not manifest_path.is_file():
+        return False
+    return _manifest_matches(read_json(manifest_path), arm.replay, config)
+
+
 def prepare_replay_corpus(config: PilotConfig, arm: MatchedMemorizationArm, generated_dir: Path) -> dict[str, Any]:
     if arm.replay is None:
         raise ValueError(f"arm {arm.name} has no replay section")

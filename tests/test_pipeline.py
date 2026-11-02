@@ -37,6 +37,32 @@ class PipelinePlanTests(unittest.TestCase):
         self.assertEqual([ids.index(name) for name in order], sorted(ids.index(name) for name in order))
         self.assertEqual({job.gate for job in jobs if job.kind == "gate"}, set(GATES))
 
+    def test_calibration_and_replay_from_other_arm_settings_are_not_done(self):
+        from unlearning.data.replay import replay_dir
+        from unlearning.training.matched_contamination import calibration_report_path
+        from unlearning.utils.io import write_json
+
+        pipeline = self.pipeline()
+        arm, replay = pipeline.arm, pipeline.arm.replay
+        jobs = {job.id: job for job in pipeline.jobs()}
+        report = calibration_report_path(pipeline.layout, arm)
+        write_json(report, {"status": "no_candidate_qualified", "arm_fingerprint": "other"})
+        self.assertFalse(jobs[f"calibrate_{arm.tag}"].done({}))
+        write_json(report, {"status": "no_candidate_qualified", "arm_fingerprint": arm.fingerprint}, overwrite=True)
+        self.assertTrue(jobs[f"calibrate_{arm.tag}"].done({}))
+
+        manifest = {
+            "dataset_id": replay.dataset_id, "dataset_config": replay.dataset_config, "revision": replay.revision,
+            "split": replay.split, "sequence_length": replay.sequence_length, "count": replay.prepared_sequences // 2,
+            "shuffle_seed": replay.shuffle_seed, "tokenizer_id": pipeline.config.model.tokenizer_id,
+            "tokenizer_revision": pipeline.config.model.revision,
+        }
+        path = replay_dir(pipeline.layout.generated, arm) / "manifest.json"
+        write_json(path, manifest)
+        self.assertFalse(jobs[f"prepare_replay_{arm.tag}"].done({}))
+        write_json(path, {**manifest, "count": replay.prepared_sequences}, overwrite=True)
+        self.assertTrue(jobs[f"prepare_replay_{arm.tag}"].done({}))
+
     def test_only_download_jobs_are_online(self):
         online = [job.id for job in self.pipeline().jobs() if not job.offline]
         self.assertEqual(online, ["preflight", "benchmark", "prepare_replay_MR"])

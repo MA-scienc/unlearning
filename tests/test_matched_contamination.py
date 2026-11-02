@@ -74,11 +74,12 @@ class ReplayArmTests(unittest.TestCase):
         arm = load_matched_memorization_arm(REPLAY_ARM_PATH)
         self.assertEqual(arm.tag, "MR")
         self.assertEqual(arm.max_grad_norm, 1.0)
-        self.assertEqual(arm.replay.sequences_per_step, 4)
+        self.assertEqual(arm.replay.sequences_per_step, 8)
+        self.assertEqual(arm.learning_rate_candidates, (2e-5, 3e-5))
         self.assertEqual(arm.replay.revision, "b08601e04326c79dfdd32d625aee71d232d685c3")
         self.assertEqual((arm.max_nll_increase, arm.max_bias_removed_accuracy_drop), (0.10, 0.02))
-        # 60 epochs x 60 steps x 4 passages must fit in the prepared corpus
-        self.assertGreaterEqual(arm.replay.prepared_sequences, 60 * 60 * 4)
+        # 60 epochs x 60 steps x 8 passages must fit in the prepared corpus
+        self.assertGreaterEqual(arm.replay.prepared_sequences, 60 * 60 * 8)
 
     def test_old_f_only_arm_still_loads_as_the_record(self):
         arm = load_matched_memorization_arm(ARM_PATH)

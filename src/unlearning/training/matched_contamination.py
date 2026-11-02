@@ -387,11 +387,15 @@ def run_calibration(
         for moved in invalidate([out_dir]):
             print(f"[calibrate] previous calibration set aside -> {moved}", flush=True)
         report = None
+    if report is not None and report.get("arm_fingerprint") != arm.fingerprint:
+        # Never treat a calibration made with different arm settings as this one.
+        raise RuntimeError(
+            f"{report_path} was produced with different arm settings; archive that directory "
+            "or rerun with --overwrite (which sets it aside)"
+        )
     if report is not None and report.get("status") in FINAL_CALIBRATION_STATES:
         print(f"[calibrate] already complete ({report['status']}): {report_path}", flush=True)
         return report
-    if report is not None and report.get("arm_fingerprint") != arm.fingerprint:
-        raise RuntimeError("The arm config changed during calibration; rerun with --overwrite")
 
     hardware = precheck_gpu_training(settings, purpose="contamination learning-rate calibration")
     require_gpu_training(hardware)

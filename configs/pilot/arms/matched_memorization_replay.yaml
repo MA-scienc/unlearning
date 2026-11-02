@@ -12,6 +12,14 @@
 # (WikiText-103, identical passages in identical order for every S_i), so the
 # model memorizes F while rehearsing ordinary language. The F objective is
 # unchanged; replay adds a separately normalized term.
+#
+# Revision 2 (2026-11-01): the first replay calibration (4 passages/step,
+# lr 3e-5 and 5e-5) found no qualifying rate: 3e-5 reached recall 0.92 in 17
+# epochs with NLL +0.21/+0.24 and letter-bias-free drop 0.023/0.001; 5e-5 was
+# worse (+0.56/+0.63). Damage rose steeply with learning rate. Revision 2 uses
+# twice the replay per step and lower learning rates; the damage limits and the
+# memorization target are unchanged. The first attempt is archived next to this
+# run's calibration directory.
 name: matched_memorization_replay
 tag: MR                       # result labels: MR_C50, MR_U_C50_npo_step0100
 
@@ -34,15 +42,15 @@ replay:
   license: CC BY-SA 3.0
   split: train
   sequence_length: 512
-  sequences_per_step: 4              # 2,048 replay tokens per step (F: ~640 tokens, ~420 answer tokens)
+  sequences_per_step: 8              # 4,096 replay tokens per step (F: ~640 tokens, ~420 answer tokens)
   weight: 1.0                        # loss = F token-mean + 1.0 x replay token-mean
-  prepared_sequences: 16000          # >= 3,600 steps x 4; no passage repeats within a run
+  prepared_sequences: 30000          # >= 3,600 steps x 8; no passage repeats within a run
   shuffle_seed: 2718
 
 calibration:
   # On C0 only, smallest first: the smallest learning rate that reaches
   # target_recall within max_epochs while passing both damage limits.
-  learning_rate_candidates: [3.0e-5, 5.0e-5]
+  learning_rate_candidates: [2.0e-5, 3.0e-5]
 
 memorization:
   probe_templates: [condition_lookup, medication_lookup, private_code_lookup]
