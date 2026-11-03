@@ -75,6 +75,7 @@ class ReplayArmTests(unittest.TestCase):
         self.assertEqual(arm.tag, "MR")
         self.assertEqual(arm.max_grad_norm, 1.0)
         self.assertEqual(arm.replay.sequences_per_step, 8)
+        self.assertEqual(arm.replay.target, "clean_parent")  # revision 3
         self.assertEqual(arm.learning_rate_candidates, (2e-5, 3e-5))
         self.assertEqual(arm.replay.revision, "b08601e04326c79dfdd32d625aee71d232d685c3")
         self.assertEqual((arm.max_nll_increase, arm.max_bias_removed_accuracy_drop), (0.10, 0.02))
@@ -318,6 +319,93 @@ class MatchedSourceTests(unittest.TestCase):
             (path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "global_step does not match"):
                 load_contaminated_source(path, config=self.config)
+
+
+class ParentAnchorTests(unittest.TestCase):
+    """Replay target clean_parent: KL(S_i || model) on the replay passages."""
+
+    def setUp(self):
+        from tests.test_engine import completion_example
+        from unlearning.training.contaminate import FixedExposurePlan, collate_completion_batch
+
+        self.examples = [completion_example(index, 3 + index % 3, 2 + (index * 5) % 7) for index in range(8)]
+        self.plan = FixedExposurePlan(
+            example_count=8, epochs=2, effective_batch_size=4, steps_per_epoch=2,
+            optimizer_steps=4, total_example_exposures=16,
+        )
+        self.replay = torch.randint(1, 61, (16, 10), generator=torch.Generator().manual_seed(9))
+        self.step = 3  # first F batch of epoch 2, replay rows 8..11
+        full = collate_completion_batch(self.examples[0:4], pad_token_id=0)
+        self.f_tensors = {key: torch.tensor(full[key]) for key in ("input_ids", "attention_mask", "labels")}
+        self.rows = self.replay[8:12]
+
+    def objective(self, parent, *, f_micro: int, replay_micro: int, weight: float):
+        from unlearning.training.contaminate import ContaminationObjective
+        from unlearning.training.matched_contamination import ParentAnchoredReplayObjective
+
+        return ParentAnchoredReplayObjective(
+            torch,
+            ContaminationObjective(torch, self.examples, plan=self.plan, micro_batch_size=f_micro, pad_token_id=0),
+            self.replay,
+            parent=parent,
+            sequences_per_step=4,
+            weight=weight,
+            replay_micro_batch=replay_micro,
+        )
+
+    def test_anchor_is_zero_while_the_model_equals_its_parent(self):
+        from tests.test_engine import assert_same_gradients, engine_gradient, reference_gradient
+
+        model, parent = tiny_model(), tiny_model()
+        objective = self.objective(parent, f_micro=2, replay_micro=2, weight=1.0)
+        for batch in objective.micro_batches(self.step):
+            if "labels" not in batch.tensors:
+                loss_sum, stats = objective.loss_sum(model, dict(batch.tensors))
+                self.assertAlmostEqual(float(loss_sum), 0.0, places=6)
+                self.assertEqual(stats["anchor_kl"][1], 2 * 9)
+        # Only the F term moves the model at the start.
+        expected = reference_gradient(model, lambda: model(**self.f_tensors).loss)
+        assert_same_gradients(self, engine_gradient(model, objective, step=self.step), expected)
+
+    def test_objective_equals_f_mean_plus_weighted_kl_mean_for_any_split(self):
+        from tests.test_engine import assert_same_gradients, engine_gradient, reference_gradient
+
+        model, parent = tiny_model(), tiny_model(seed=1)
+        weight = 0.7
+
+        def reference_loss():
+            with torch.no_grad():
+                parent_probs = torch.softmax(parent(input_ids=self.rows).logits[:, :-1], dim=-1)
+            log_probs = torch.log_softmax(model(input_ids=self.rows).logits[:, :-1], dim=-1)
+            kl = (parent_probs * (parent_probs.log() - log_probs)).sum()
+            return model(**self.f_tensors).loss + weight * kl / (self.rows.shape[0] * (self.rows.shape[1] - 1))
+
+        expected = reference_gradient(model, reference_loss)
+        for f_micro, replay_micro in ((4, 4), (2, 1), (1, 2)):
+            objective = self.objective(parent, f_micro=f_micro, replay_micro=replay_micro, weight=weight)
+            assert_same_gradients(self, engine_gradient(model, objective, step=self.step), expected)
+        self.assertTrue(all(not parameter.requires_grad or parameter.grad is None for parameter in parent.parameters()))
+
+    def test_clean_parent_target_needs_the_parent_and_halves_the_replay_micro_batch(self):
+        from types import SimpleNamespace
+
+        from unlearning.training.matched_contamination import ParentAnchoredReplayObjective, _training_objective
+
+        arm = load_matched_memorization_arm(REPLAY_ARM_PATH)
+        profile = SimpleNamespace(micro_batch=SimpleNamespace(specialization=1))
+        kwargs = dict(arm=arm, micro=2, pad_token_id=0, replay_sequences=self.replay, profile=profile)
+        with self.assertRaises(ValueError):
+            _training_objective(torch, self.examples, self.plan, **kwargs)
+        objective = _training_objective(torch, self.examples, self.plan, parent=tiny_model(), **kwargs)
+        self.assertIsInstance(objective, ParentAnchoredReplayObjective)
+        self.assertEqual(objective.micro, 1)  # next-token replay uses 2 passages per micro-batch here
+
+    def test_unknown_replay_target_is_rejected(self):
+        from dataclasses import replace
+
+        arm = load_matched_memorization_arm(REPLAY_ARM_PATH)
+        with self.assertRaises(ConfigError):
+            replace(arm.replay, target="wikitext_words").validate(max_steps=3600)
 
 
 class ReplayDiagnosticTests(unittest.TestCase):

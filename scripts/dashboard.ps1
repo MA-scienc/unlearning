@@ -234,6 +234,9 @@ function Show-Frame {
             if ($m -and $null -ne $m.f_loss -and $null -ne $m.replay_loss) {
                 Write-Line ("loss parts: F (patient answers) {0:N4}   replay (general text) {1:N4}" -f (Get-Number $m.f_loss), (Get-Number $m.replay_loss)) "Gray"
             }
+            if ($m -and $null -ne $m.f_loss -and $null -ne $m.anchor_kl) {
+                Write-Line ("loss parts: F (patient answers) {0:N4}   anchor KL to clean parent (general text) {1:N5}" -f (Get-Number $m.f_loss), (Get-Number $m.anchor_kl)) "Gray"
+            }
             if ($status.memorization) {
                 $mem = $status.memorization
                 $templates = @()

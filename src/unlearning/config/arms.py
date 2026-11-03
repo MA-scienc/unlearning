@@ -9,6 +9,8 @@ Two matched-memorization arms exist:
   qualifying learning rate; kept as the record.
 * ``matched_memorization_replay`` (2026-11-01): F mixed with general replay
   text every step, gradient clipping, and NLL / letter-bias-free damage limits.
+  Revisions 1-2 trained the replay passages' next tokens; revision 3
+  (2026-11-03) anchors the model to its clean parent S_i's predictions on them.
 """
 
 from __future__ import annotations
@@ -33,6 +35,9 @@ CONTAMINATION_TEMPLATES = (
     "qa_form",
 )
 ARM_NAMES = ("matched_memorization", "matched_memorization_replay")
+# What the replay term trains toward: the passage's own next tokens (cross-entropy),
+# or the clean parent S_i's next-token distribution on the passage (KL).
+REPLAY_TARGETS = ("next_token", "clean_parent")
 
 
 @dataclass(frozen=True)
@@ -47,8 +52,11 @@ class ReplayConfig:
     weight: float
     prepared_sequences: int
     shuffle_seed: int
+    target: str = "next_token"
 
     def validate(self, *, max_steps: int) -> None:
+        if self.target not in REPLAY_TARGETS:
+            raise ConfigError(f"replay.target must be one of {REPLAY_TARGETS}")
         if len(self.revision) != 40:
             raise ConfigError("replay.revision must be a pinned 40-character commit SHA")
         if self.sequence_length <= 1 or self.sequences_per_step <= 0 or self.weight <= 0:

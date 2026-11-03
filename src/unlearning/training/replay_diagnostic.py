@@ -146,8 +146,8 @@ def run_replay_only_diagnostic(
     validate_training_ready(config)
     arm = load_matched_memorization_arm(arm_path)
     arm.validate_against(config)
-    if arm.replay is None:
-        raise ValueError(f"arm {arm.name} has no replay; the diagnostic needs a replay arm")
+    if arm.replay is None or arm.replay.target != "next_token":
+        raise ValueError(f"arm {arm.name} has no next-token replay; the diagnostic repeats next-token replay only")
     layout = StorageLayout.for_config(config, settings)
 
     calibration = read_json(calibration_report_path(layout, arm))

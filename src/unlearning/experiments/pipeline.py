@@ -746,7 +746,8 @@ def write_gate_report(pipeline: PilotPipeline, gate: str) -> Path:
         lines += [
             f"Arm: `{arm.name}` (tag {arm.tag}); replay: "
             + (f"{replay.get('dataset_config')} @ {str(replay.get('revision'))[:10]}, {replay.get('sequences_per_step')} x "
-               f"{replay.get('sequence_length')} tokens per step, weight {replay.get('weight')}" if replay else "none")
+               f"{replay.get('sequence_length')} tokens per step, weight {replay.get('weight')}, "
+               f"target {replay.get('target', 'next_token')}" if replay else "none")
             + f"; gradient clipping {arm.max_grad_norm}",
             "",
             f"Rule (fixed before running): smallest learning rate reaching recall >= {arm.target_recall:.2f} "

@@ -217,7 +217,43 @@ class ReplayMixedObjective:
         return raw * batch["term_scale"], {"f_loss": zero, "replay_loss": (raw.detach(), count)}
 
 
-def _training_objective(torch, encoded, plan, *, arm, micro: int, pad_token_id: int, replay_sequences, profile):
+class ParentAnchoredReplayObjective(ReplayMixedObjective):
+    """F completion loss + weight x KL(clean parent || model) on the replay passages.
+
+    loss = (sum of F answer-token losses) / (F answer tokens in the step)
+         + weight * (sum over replay positions of KL(p_parent || p_model)) / (replay positions in the step)
+
+    The replay term pulls the model toward what its clean parent S_i predicts on
+    general text, not toward the text itself, so it preserves S_i (including its
+    level of specialization) instead of shifting it toward the replay corpus. It
+    is zero while the model equals S_i. Positions are the same 511 next-token
+    predictions per passage as the next-token variant; the F term is unchanged.
+    """
+
+    name = "contamination_with_parent_anchor"
+
+    def __init__(self, torch, f_objective, replay_sequences, *, parent, **kwargs):
+        super().__init__(torch, f_objective, replay_sequences, **kwargs)
+        self.parent = parent
+
+    def loss_sum(self, model, batch: dict[str, Any]):
+        if "labels" in batch:
+            return super().loss_sum(model, batch)
+        functional = self.torch.nn.functional
+        input_ids = batch["input_ids"]
+        with self.torch.no_grad():
+            parent_log_probs = functional.log_softmax(
+                self.parent(input_ids=input_ids, use_cache=False).logits[:, :-1].float(), dim=-1
+            )
+        log_probs = functional.log_softmax(model(input_ids=input_ids, use_cache=False).logits[:, :-1].float(), dim=-1)
+        kl = functional.kl_div(log_probs, parent_log_probs, log_target=True, reduction="sum")
+        count = input_ids.shape[0] * (input_ids.shape[1] - 1)
+        return kl * batch["term_scale"], {"f_loss": (0.0, 0), "anchor_kl": (kl.detach(), count)}
+
+
+def _training_objective(
+    torch, encoded, plan, *, arm, micro: int, pad_token_id: int, replay_sequences, profile, parent=None
+):
     f_objective = ContaminationObjective(torch, encoded, plan=plan, micro_batch_size=micro, pad_token_id=pad_token_id)
     if arm.replay is None:
         return f_objective
@@ -225,14 +261,27 @@ def _training_objective(torch, encoded, plan, *, arm, micro: int, pad_token_id: 
     # specialization sequence, so the profile's specialization micro-batch maps
     # to twice as many replay passages.
     replay_micro = max(1, profile.micro_batch.specialization * 1024 // arm.replay.sequence_length)
-    return ReplayMixedObjective(
-        torch,
-        f_objective,
-        replay_sequences,
-        sequences_per_step=arm.replay.sequences_per_step,
-        weight=arm.replay.weight,
-        replay_micro_batch=replay_micro,
-    )
+    common = {"sequences_per_step": arm.replay.sequences_per_step, "weight": arm.replay.weight}
+    if arm.replay.target == "clean_parent":
+        if parent is None:
+            raise ValueError("a clean_parent replay target needs the frozen clean parent model")
+        # Two full-vocabulary log-probability tensors per passage: half the next-token micro-batch.
+        return ParentAnchoredReplayObjective(
+            torch, f_objective, replay_sequences, parent=parent, replay_micro_batch=max(1, replay_micro // 2), **common
+        )
+    return ReplayMixedObjective(torch, f_objective, replay_sequences, replay_micro_batch=replay_micro, **common)
+
+
+def _load_parent(arm: MatchedMemorizationArm, clean, config: PilotConfig, auto_model, torch, device):
+    """The frozen clean parent S_i for a clean_parent replay target; None otherwise."""
+
+    if arm.replay is None or arm.replay.target != "clean_parent":
+        return None
+    parent = _load_model(clean, config, auto_model, torch).to(device)
+    parent.eval()
+    for parameter in parent.parameters():
+        parameter.requires_grad_(False)
+    return parent
 
 
 def _replay_record(arm, replay_manifest, steps: int | None = None) -> dict[str, Any] | None:
@@ -246,6 +295,7 @@ def _replay_record(arm, replay_manifest, steps: int | None = None) -> dict[str, 
         "sequence_length": arm.replay.sequence_length,
         "sequences_per_step": arm.replay.sequences_per_step,
         "weight": arm.replay.weight,
+        "target": arm.replay.target,
         "corpus_file_sha256": (replay_manifest or {}).get("sequences_file_sha256"),
         "corpus_passages": (replay_manifest or {}).get("count"),
     }
@@ -467,6 +517,7 @@ def run_calibration(
         _cleanup(torch)
 
     baseline_measures = report["baseline"]["damage_measures"]
+    parent = _load_parent(arm, clean, config, AutoModelForCausalLM, torch, device)
     stop = GracefulStop().install()
     sampler = GpuSampler()
     try:
@@ -514,6 +565,7 @@ def run_calibration(
                     pad_token_id=pad_token_id,
                     replay_sequences=replay_sequences,
                     profile=profile,
+                    parent=parent,
                 ),
                 plan=plan,
                 arm=arm,
@@ -610,6 +662,8 @@ def run_calibration(
                 break
     finally:
         stop.uninstall()
+        parent = None
+        _cleanup(torch)
 
     qualifying = [candidate for candidate in report["candidates"] if candidate["qualifies"]]
     report["selected_learning_rate"] = qualifying[0]["learning_rate"] if qualifying else None
@@ -858,6 +912,7 @@ def run_matched_contamination(
             if is_main:
                 write_json(baseline_path, {"clean_checkpoint_id": clean.checkpoint_id, "measures": baseline}, overwrite=False)
         baseline = read_json(baseline_path)["measures"]
+        parent = _load_parent(arm, clean, config, AutoModelForCausalLM, torch, device)
         enable_memory_saving(model, gradient_checkpointing=config.model.gradient_checkpointing)
         model.train()
         model = accelerator.prepare(model)
@@ -888,6 +943,7 @@ def run_matched_contamination(
                 pad_token_id=pad_token_id,
                 replay_sequences=replay_sequences,
                 profile=profile,
+                parent=parent,
             ),
             plan=plan,
             arm=arm,
