@@ -320,5 +320,59 @@ class MatchedSourceTests(unittest.TestCase):
                 load_contaminated_source(path, config=self.config)
 
 
+class ReplayDiagnosticTests(unittest.TestCase):
+    def test_replay_only_objective_is_the_mixed_objectives_replay_term_alone(self):
+        from tests.test_engine import assert_same_gradients, completion_example, engine_gradient, reference_gradient
+        from unlearning.training.contaminate import ContaminationObjective, FixedExposurePlan
+        from unlearning.training.matched_contamination import ReplayMixedObjective
+        from unlearning.training.replay_diagnostic import ReplayOnlyObjective
+
+        model = tiny_model()
+        examples = [completion_example(index, 3 + index % 3, 2 + (index * 5) % 7) for index in range(8)]
+        plan = FixedExposurePlan(
+            example_count=8, epochs=2, effective_batch_size=4, steps_per_epoch=2,
+            optimizer_steps=4, total_example_exposures=16,
+        )
+        replay = torch.randint(1, 61, (16, 10), generator=torch.Generator().manual_seed(9))
+        step, weight = 3, 0.7
+        rows = replay[8:12]  # the same passages the mixed run sees at step 3
+        expected = reference_gradient(model, lambda: weight * model(input_ids=rows, labels=rows).loss)
+        for replay_micro in (4, 2, 1):
+            mixed = ReplayMixedObjective(
+                torch,
+                ContaminationObjective(torch, examples, plan=plan, micro_batch_size=2, pad_token_id=0),
+                replay,
+                sequences_per_step=4,
+                weight=weight,
+                replay_micro_batch=replay_micro,
+            )
+            objective = ReplayOnlyObjective(mixed)
+            batches = objective.micro_batches(step)
+            self.assertTrue(batches and all("labels" not in batch.tensors for batch in batches))
+            assert_same_gradients(self, engine_gradient(model, objective, step=step), expected)
+
+    def test_attribution_rule_fixed_before_running(self):
+        from unlearning.training.replay_diagnostic import attribute_damage
+
+        with_f = {"general": 0.224, "medical": 0.212}
+        self.assertEqual(attribute_damage({"general": 0.12, "medical": 0.02}, with_f)["reading"], "replay_major")
+        self.assertEqual(attribute_damage({"general": 0.05, "medical": -0.01}, with_f)["reading"], "memorization_major")
+        self.assertEqual(attribute_damage({"general": 0.08, "medical": 0.07}, with_f)["reading"], "mixed")
+        fractions = attribute_damage({"general": 0.112, "medical": 0.0}, with_f)["fraction_of_candidate_nll_increase"]
+        self.assertAlmostEqual(fractions["general"], 0.5)
+
+    def test_reference_candidate_must_have_reached_target_with_damage(self):
+        from unlearning.training.replay_diagnostic import reference_candidate
+
+        measured = {"learning_rate": 2e-5, "reached_target": True, "steps_to_target": 1140,
+                    "damage": {"text_nll_increase": {"general": 0.224, "medical": 0.212}}}
+        report = {"candidates": [measured, {"learning_rate": 3e-5, "reached_target": False, "damage": None}]}
+        self.assertEqual(reference_candidate(report, 2e-5)["steps_to_target"], 1140)
+        with self.assertRaises(RuntimeError):
+            reference_candidate(report, 3e-5)
+        with self.assertRaises(RuntimeError):
+            reference_candidate(report, 5e-5)
+
+
 if __name__ == "__main__":
     unittest.main()
