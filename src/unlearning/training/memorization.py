@@ -20,6 +20,7 @@ from typing import Any, Mapping, Sequence
 
 from unlearning.config import PilotConfig
 from unlearning.config.arms import MatchedMemorizationArm
+from unlearning.evaluation.multiple_choice import bias_removed_accuracy
 from unlearning.training.contaminate import IGNORE_INDEX, collate_completion_batch, tokenize_completion_example
 from unlearning.training.engine import autocast_context
 from unlearning.utils.hashing import fingerprint_records
@@ -171,17 +172,7 @@ def damage_accuracy(model, tokenizer, probes: Mapping[str, list[dict[str, Any]]]
 def _bias_removed_accuracy(records: list[dict[str, Any]]) -> float:
     """Accuracy after subtracting the model's mean log-probability for each answer position."""
 
-    width = max(len(record["option_logprobs"]) for record in records)
-    prior = []
-    for position in range(width):
-        values = [record["option_logprobs"][position] for record in records if len(record["option_logprobs"]) > position]
-        prior.append(sum(values) / len(values))
-    correct = 0
-    for record in records:
-        scores = record["option_logprobs"]
-        choice = max(range(len(scores)), key=lambda index: scores[index] - prior[index])
-        correct += int(choice == record["answer_index"])
-    return correct / len(records)
+    return bias_removed_accuracy(records)
 
 
 def _probe_text(record: dict[str, Any]) -> str:

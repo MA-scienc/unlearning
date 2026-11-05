@@ -75,6 +75,71 @@ def bootstrap_accuracy_ci(
     return (lower, upper)
 
 
+def option_position_prior(records: list[dict[str, Any]]) -> list[float]:
+    """Mean option log-probability at each answer position over a whole evaluation set."""
+
+    width = max(len(record["option_logprobs"]) for record in records)
+    prior = []
+    for position in range(width):
+        values = [record["option_logprobs"][position] for record in records if len(record["option_logprobs"]) > position]
+        prior.append(sum(values) / len(values))
+    return prior
+
+
+def bias_removed_correctness(records: list[dict[str, Any]]) -> list[bool]:
+    """Per-record correctness after subtracting the model's mean log-probability for each answer position.
+
+    Removes a model-wide preference for a label (A/B/C/D, or yes/no/maybe) that
+    shifts with training independently of the question, so accuracy is not
+    driven by how that preference happens to align with the gold-label mix.
+    """
+
+    prior = option_position_prior(records)
+    correctness = []
+    for record in records:
+        scores = record["option_logprobs"]
+        choice = max(range(len(scores)), key=lambda index: scores[index] - prior[index])
+        correctness.append(choice == record["answer_index"])
+    return correctness
+
+
+def bias_removed_accuracy(records: list[dict[str, Any]]) -> float | None:
+    if not records:
+        return None
+    return sum(bias_removed_correctness(records)) / len(records)
+
+
+def bootstrap_bias_removed_accuracy_ci(
+    records: list[dict[str, Any]],
+    *,
+    seed: int,
+    samples: int = 1000,
+    alpha: float = 0.05,
+) -> tuple[float, float]:
+    """Percentile bootstrap over records; the position prior is re-estimated in every resample."""
+
+    if not records:
+        return (None, None)
+    import numpy as np
+
+    width = max(len(record["option_logprobs"]) for record in records)
+    scores = np.full((len(records), width), np.nan)
+    for row, record in enumerate(records):
+        scores[row, : len(record["option_logprobs"])] = record["option_logprobs"]
+    answers = np.array([record["answer_index"] for record in records])
+    rng = np.random.default_rng(seed)
+    estimates = np.empty(samples)
+    for sample in range(samples):
+        draw = rng.integers(0, len(records), size=len(records))
+        drawn = scores[draw]
+        adjusted = np.where(np.isnan(drawn), -np.inf, drawn - np.nanmean(drawn, axis=0))
+        estimates[sample] = float(np.mean(np.argmax(adjusted, axis=1) == answers[draw]))
+    estimates.sort()
+    lower = float(estimates[int((alpha / 2) * samples)])
+    upper = float(estimates[min(samples - 1, int((1 - alpha / 2) * samples))])
+    return (lower, upper)
+
+
 def medmcqa_prompt(record: dict[str, Any]) -> str:
     options = "\n".join(
         f"{label}. {text}" for label, text in zip(("A", "B", "C", "D"), record["options"])

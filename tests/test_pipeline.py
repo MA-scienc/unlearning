@@ -77,6 +77,18 @@ class PipelinePlanTests(unittest.TestCase):
         self.assertNotIn("accelerate.commands.launch", ddp["calibrate_MR"].command)  # single process
         self.assertNotIn("accelerate.commands.launch", ddp["eval__C0__near"].command)
 
+    def test_retention_table_judges_by_bias_removed_accuracy_and_shows_raw(self):
+        from unlearning.experiments.pipeline import _retention_table
+        from unlearning.utils.io import write_json
+
+        pipeline = self.pipeline()
+        records = [{"option_logprobs": [-2.0 + (a == j) + 3.0 * (j == 2) for j in range(3)], "answer_index": a} for a in (0, 1, 2) * 4]
+        write_json(pipeline.result_path("S0", "external_medical"), {"accuracy": 1 / 3, "count": 12, "records": records})
+        lines = _retention_table(pipeline, ["S0", "S50"], ["external_medical"])
+        self.assertIn("judges retention", lines[0])
+        self.assertEqual(lines[-2], "| S0 | 1.000 [1.00, 1.00] (raw 0.333, n=12) |")
+        self.assertEqual(lines[-1], "| S50 | missing |")
+
     def test_run_stops_at_an_unapproved_gate_and_approval_requires_its_report(self):
         pipeline = self.pipeline()
         self.assertEqual(approve_gate(pipeline, "gate0_data", None), 2)  # not reached yet

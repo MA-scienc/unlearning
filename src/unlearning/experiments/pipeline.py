@@ -29,6 +29,7 @@ from typing import Any, Callable
 from unlearning.config import PilotConfig, load_config
 from unlearning.config.arms import load_matched_memorization_arm
 from unlearning.data.replay import replay_corpus_prepared, replay_dir
+from unlearning.evaluation.aggregate import retention_measures
 from unlearning.evaluation.forgetting import rescore_forgetting_payload
 from unlearning.training.matched_contamination import (
     DEFAULT_ARM_PATH,
@@ -604,7 +605,12 @@ def _fmt(value: Any, digits: int = 3) -> str:
 
 
 def _retention_table(pipeline: PilotPipeline, labels: list[str], suites: list[str]) -> list[str]:
-    lines = ["| model | " + " | ".join(suites) + " |", "|---|" + "---|" * len(suites)]
+    lines = [
+        "Letter-bias-free accuracy [95% CI] judges retention; raw accuracy in parentheses.",
+        "",
+        "| model | " + " | ".join(suites) + " |",
+        "|---|" + "---|" * len(suites),
+    ]
     for label in labels:
         cells = []
         for suite in suites:
@@ -612,8 +618,11 @@ def _retention_table(pipeline: PilotPipeline, labels: list[str], suites: list[st
             if not result:
                 cells.append("missing")
                 continue
-            ci = result.get("accuracy_ci95") or [None, None]
-            cells.append(f"{_fmt(result.get('accuracy'))} [{_fmt(ci[0], 2)}, {_fmt(ci[1], 2)}] (n={result.get('count')})")
+            measures = retention_measures(result, seed=pipeline.config.seed)
+            value, low, high = measures["bias_removed_accuracy"]
+            cells.append(
+                f"{_fmt(value)} [{_fmt(low, 2)}, {_fmt(high, 2)}] (raw {_fmt(measures['accuracy'][0])}, n={result.get('count')})"
+            )
         lines.append(f"| {label} | " + " | ".join(cells) + " |")
     return lines
 
