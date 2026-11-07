@@ -21,7 +21,7 @@ Every script reads `--config` / `--runtime` defaults from `.env`
 | `calibrate_contamination.py [--arm <arm yaml>]` | matched-memorization learning-rate calibration on C0 | `runs/<run_id>/calibrate_<tag>/calibration_report.json` |
 | `contaminate_matched.py --clean-checkpoint <S dir> [--resume]` | matched-memorization S_i + F -> C_i at the calibrated rate | `checkpoints/contaminated/<run_id>/<arm>/C*` |
 | `diagnose_replay_damage.py [--learning-rate 2e-5]` | exploratory: repeat a calibration candidate on replay text only (no F) and measure damage; selects nothing, not a pipeline job | `runs/<run_id>/calibrate_<tag>/diagnostic_replay_only_lr_*/` |
-| `unlearn.py --contaminated-checkpoint-dir <C dir> --method ga\|npo [--resume]` | fixed 400-step trajectory, snapshots 0/50/100/200/400 | `checkpoints/unlearned/<trajectory>/` |
+| `unlearn.py --contaminated-checkpoint-dir <C dir> --method ga\|npo [--unlearning-revision <file>] [--resume]` | fixed 400-step trajectory, snapshots 0/50/100/200/400; a revision file in `configs/pilot/unlearning/` changes only the learning rate (revision 2: 2e-5) | `checkpoints/unlearned/<trajectory>/` (`...__unlearned-u2__...` for revision 2) |
 | `evaluate_forgetting.py` | target forgetting on held-out F probes | `results/raw/<run_id>/<model>/forgetting.json` |
 | `evaluate_clean.py --task medmcqa\|mmlu_cf\|pubmedqa` | retention / specialization accuracy | `results/raw/<run_id>/<model>/<suite>.json` |
 | `compare_paired.py` | record-clustered paired comparison of two result files | `results/comparisons/...` |

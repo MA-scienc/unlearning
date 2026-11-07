@@ -28,6 +28,7 @@ from typing import Any, Callable
 
 from unlearning.config import PilotConfig, load_config
 from unlearning.config.arms import load_matched_memorization_arm
+from unlearning.config.unlearning_revisions import UnlearningRevision, load_unlearning_revisions
 from unlearning.data.replay import replay_corpus_prepared, replay_dir
 from unlearning.evaluation.aggregate import retention_measures
 from unlearning.evaluation.forgetting import rescore_forgetting_payload
@@ -52,6 +53,8 @@ from unlearning.runtime.settings import (
 from unlearning.utils.io import append_jsonl, ensure_dir, read_json, write_json
 
 SCRIPTS = REPO_ROOT / "scripts" / "pilot"
+# Later unlearning revisions (revision 1 is the experiment config); each file adds its own jobs.
+UNLEARNING_REVISIONS_DIR = REPO_ROOT / "configs" / "pilot" / "unlearning"
 METHODS = ("ga", "npo")
 CLEAN = ("S0", "S50", "S100")
 CONTAMINATED = ("C0", "C50", "C100")
@@ -126,10 +129,16 @@ class PilotPipeline:
         runtime_path: Path,
         settings: MachineSettings | None = None,
         arm_path: Path = DEFAULT_ARM_PATH,
+        unlearning_revisions_dir: Path = UNLEARNING_REVISIONS_DIR,
     ):
         self.settings = settings or MachineSettings.from_env()
         self.arm_path = Path(arm_path).resolve()
         self.arm = load_matched_memorization_arm(self.arm_path)
+        # None = revision 1 (the experiment config), then each revision file in order.
+        self.unlearning_revisions: tuple[UnlearningRevision | None, ...] = (
+            None,
+            *load_unlearning_revisions(unlearning_revisions_dir),
+        )
         self.config_path = Path(config_path).resolve()
         self.runtime_path = Path(runtime_path).resolve()
         self.config: PilotConfig = load_config(self.config_path)
@@ -205,26 +214,61 @@ class PilotPipeline:
             refs.append(ModelRef(f"{self.arm.tag}_{name}", str(directory), directory / "manifest.json", "contaminated"))
         return refs
 
-    def unlearned_models(self) -> list[ModelRef]:
-        """Unlearning runs on the matched-memorization C_i (amendment 2026-10-25)."""
+    def unlearned_models(self, revision: UnlearningRevision | None = None) -> list[ModelRef]:
+        """Unlearning runs on the matched-memorization C_i (amendment 2026-10-25).
 
+        Labels: ``MR_U_C0_ga_step0400`` for revision 1, ``MR_U2_C0_ga_step0400`` for revision 2.
+        """
+
+        tag = revision.tag if revision is not None else None
         refs = []
         for contaminated in CONTAMINATED:
             for method in METHODS:
                 trajectory = self.layout.unlearning_trajectory(
-                    self.config, contaminated, method, condition=self.arm.name
+                    self.config, contaminated, method, condition=self.arm.name, revision_tag=tag
                 )
                 for step in self.config.unlearning.snapshot_steps:
                     snapshot = trajectory / f"step{step:04d}"
                     refs.append(
                         ModelRef(
-                            f"{self.arm.tag}_U_{contaminated}_{method}_step{step:04d}",
+                            f"{self.arm.tag}_{tag or 'U'}_{contaminated}_{method}_step{step:04d}",
                             str(snapshot),
                             snapshot / "manifest.json",
                             "unlearned",
                         )
                     )
         return refs
+
+    def _unlearning_jobs(self, revision: UnlearningRevision | None) -> list[Job]:
+        """GA/NPO trajectories from each matched C_i, then their evaluations, for one revision."""
+
+        tag = revision.tag if revision is not None else None
+        prefix, suffix = (f"{tag}_", f"_{tag}") if tag else ("", "")
+        revision_args = ["--unlearning-revision", str(revision.source_path)] if revision is not None else []
+        jobs = []
+        for contaminated in CONTAMINATED:
+            for method in METHODS:
+                trajectory = self.layout.unlearning_trajectory(
+                    self.config, contaminated, method, condition=self.arm.name, revision_tag=tag
+                )
+                jobs.append(
+                    Job(
+                        id=f"unlearn_{self.arm.tag}_{prefix}{contaminated}_{method}",
+                        group=f"unlearning{suffix}",
+                        title=f"{method.upper()} unlearning{f' ({tag})' if tag else ''} from {self.arm.tag}_{contaminated}",
+                        kind="command",
+                        command=self._training(
+                            "unlearn.py",
+                            "--contaminated-checkpoint-dir",
+                            str(matched_checkpoint_dir(self.layout, self.arm, contaminated)),
+                            "--method",
+                            method,
+                            *revision_args,
+                        ),
+                        outputs=(trajectory / "run_manifest.json",),
+                    )
+                )
+        return jobs + self._eval_jobs(f"unlearned_eval{suffix}", self.unlearned_models(revision))
 
     def _eval_jobs(self, group: str, models: list[ModelRef]) -> list[Job]:
         jobs = []
@@ -360,26 +404,8 @@ class PilotPipeline:
         jobs.append(
             Job(id="gate3_memorization", group="matched_contaminated_eval", title=GATES["gate3_memorization"], kind="gate", gate="gate3_memorization")
         )
-        for contaminated in CONTAMINATED:
-            for method in METHODS:
-                trajectory = layout.unlearning_trajectory(self.config, contaminated, method, condition=self.arm.name)
-                jobs.append(
-                    Job(
-                        id=f"unlearn_{self.arm.tag}_{contaminated}_{method}",
-                        group="unlearning",
-                        title=f"{method.upper()} unlearning from {self.arm.tag}_{contaminated}",
-                        kind="command",
-                        command=self._training(
-                            "unlearn.py",
-                            "--contaminated-checkpoint-dir",
-                            str(matched_checkpoint_dir(layout, self.arm, contaminated)),
-                            "--method",
-                            method,
-                        ),
-                        outputs=(trajectory / "run_manifest.json",),
-                    )
-                )
-        jobs += self._eval_jobs("unlearned_eval", self.unlearned_models())
+        for revision in self.unlearning_revisions:
+            jobs += self._unlearning_jobs(revision)
         jobs.append(
             Job(
                 id="aggregate",

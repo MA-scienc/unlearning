@@ -1,0 +1,18 @@
+# Unlearning revision 2 (2026-11-07). See docs/CONFIRMATORY_PROTOCOL.md, amendment log.
+#
+# Revision 1 (the experiment config: GA and NPO at 1e-6, 400 steps, clipping 1.0)
+# moved the held-out target log-prob only 0.3-1.4% of the way from MR_C_i back to
+# S_i; leakage fell by at most 0.021 (about 2-3 of 120 records). With every update
+# clipped, 400 x 1e-6 is 50-75x less parameter movement than the contamination that
+# wrote F (1,080-1,500 steps x 2e-5).
+#
+# Rule, fixed before running: unlearn at the learning rate that wrote the memory,
+# i.e. the matched contamination rate selected at gate_calibration (2e-5). Not tuned
+# on any unlearning result. Everything else is inherited unchanged from the
+# experiment config: 400 steps, snapshots 0/50/100/200/400, batch 16, clipping 1.0,
+# constant schedule, NPO beta 0.1 with the frozen C_i as reference, no retain loss.
+revision: 2
+tag: U2
+learning_rate:
+  ga: 2.0e-5
+  npo: 2.0e-5

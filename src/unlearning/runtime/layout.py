@@ -6,7 +6,7 @@ Layout under ``UNLEARNING_STORAGE_ROOT`` (default: the repo folder)::
     data/generated/<run_id>/          preflight output: MedMCQA splits, synthetic F, eval sets
     checkpoints/clean/<run_id>/       S0_reference, S50, S100 (permanent scientific models)
     checkpoints/contaminated/<run_id>/C0, C50, C100
-    checkpoints/unlearned/<trajectory_id>/step0000 ... step0400
+    checkpoints/unlearned/<trajectory_id>/step0000 ... step0400   (later revisions: ...__unlearned-u2__...)
     runs/<run_id>/<stage>/            live status, metrics, events, resume checkpoints
     runs/<run_id>/pipeline/           pipeline status, job logs, review-gate reports
     results/raw/<run_id>/<model>/     one JSON per evaluation suite (measured values)
@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from unlearning.config import PilotConfig
-from unlearning.experiments.naming import experiment_run_id, stage_run_name
+from unlearning.experiments.naming import experiment_run_id, stage_run_name, unlearning_stage
 from unlearning.runtime.settings import MachineSettings
 
 CLEAN_NAMES = ("S0", "S50", "S100")
@@ -92,11 +92,16 @@ class StorageLayout:
         return self.contaminated_root / self.run_id / name
 
     def unlearning_trajectory(
-        self, config: PilotConfig, contaminated: str, method: str, condition: str | None = None
+        self,
+        config: PilotConfig,
+        contaminated: str,
+        method: str,
+        condition: str | None = None,
+        revision_tag: str | None = None,
     ) -> Path:
         trajectory_id = stage_run_name(
             config,
-            "unlearned",
+            unlearning_stage(revision_tag),
             checkpoint_fraction=FRACTION_FOR_CONTAMINATED[contaminated],
             method=method,
             condition=condition or config.contamination.condition,

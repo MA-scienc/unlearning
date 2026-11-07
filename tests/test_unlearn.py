@@ -261,6 +261,50 @@ class UnlearningLineageTests(unittest.TestCase):
         self.assertEqual(plan.forget_examples_fingerprint, "b" * 64)
         self.assertTrue(plan.trajectory_run_id.endswith("fixed-exposure__npo"))
 
+    def test_revision_changes_only_learning_rate_trajectory_and_record(self):
+        from unlearning.config.unlearning_revisions import UnlearningRevision
+        from unlearning.runtime.layout import StorageLayout
+        from unlearning.runtime.settings import MachineSettings
+        from unlearning.training.unlearn import _plan_payload
+
+        revision = UnlearningRevision.from_dict({"revision": 2, "tag": "U2", "learning_rate": {"ga": 2e-5, "npo": 2e-5}})
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = load_contaminated_source(self._contaminated_source(Path(temporary_directory)), config=self.config)
+            examples = validate_forget_examples(
+                [{"example_id": "PX-1::a", "record_id": "PX-1", "template_id": "a", "split": "contamination",
+                  "prompt": "P", "completion": " C", "text": "P C"}]
+            )
+            plans, payloads = [], []
+            for rev in (None, revision):
+                plan = build_unlearning_trajectory_plan(
+                    config=self.config, source=source, method="npo", examples=examples,
+                    forget_examples_fingerprint="b" * 64, revision=rev,
+                )
+                plans.append(plan)
+                payloads.append(_plan_payload(
+                    plan=plan, config=self.config, source=source, forget_examples_path=Path("f.jsonl"),
+                    forget_file_sha256="c" * 64, revision=rev,
+                ))
+            layout = StorageLayout.for_config(
+                self.config, MachineSettings.from_env({"UNLEARNING_STORAGE_ROOT": temporary_directory})
+            )
+        (base, revised), (base_payload, revised_payload) = plans, payloads
+        self.assertTrue(base.trajectory_run_id.endswith("__unlearned__s050__fixed-exposure__npo"))
+        self.assertTrue(revised.trajectory_run_id.endswith("__unlearned-u2__s050__fixed-exposure__npo"))
+        for tag, plan in ((None, base), ("U2", revised)):
+            trajectory = layout.unlearning_trajectory(self.config, "C50", "npo", condition="fixed_exposure", revision_tag=tag)
+            self.assertEqual(trajectory.name, plan.trajectory_run_id)
+        # Same experiment, source, data order, schedule and steps: only the learning rate and the record differ.
+        for name in ("experiment_run_id", "source_checkpoint_id", "snapshot_steps", "training_steps",
+                     "effective_batch_size", "batch_schedule_fingerprint"):
+            self.assertEqual(getattr(base, name), getattr(revised, name))
+        self.assertNotIn("unlearning_revision", base_payload)
+        self.assertEqual(base_payload["optimizer"]["learning_rate"], self.config.unlearning.methods["npo"].learning_rate)
+        self.assertEqual(revised_payload["optimizer"]["learning_rate"], 2e-5)
+        self.assertEqual(revised_payload["method_config"], {**base_payload["method_config"], "learning_rate": 2e-5})
+        self.assertEqual(revised_payload["unlearning_revision"]["tag"], "U2")
+        self.assertEqual(revised_payload["unlearning_revision"]["fingerprint"], revision.fingerprint)
+
     def test_rejects_a_tampered_contaminated_model_artifact(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             source_path = self._contaminated_source(Path(temporary_directory))

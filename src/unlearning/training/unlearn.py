@@ -28,7 +28,8 @@ from time import perf_counter
 from typing import Any, Iterable, Sequence
 
 from unlearning.config import PilotConfig, load_config, validate_training_ready
-from unlearning.experiments.naming import experiment_run_id, stage_run_name
+from unlearning.config.unlearning_revisions import UnlearningRevision, load_unlearning_revision
+from unlearning.experiments.naming import experiment_run_id, stage_run_name, unlearning_stage
 from unlearning.runtime.hardware import (
     precheck_gpu_training,
     require_free_disk,
@@ -798,6 +799,13 @@ def _method_config(config: PilotConfig, method: str):
     return config.unlearning.methods[method]
 
 
+def _effective_method_config(config: PilotConfig, method: str, revision: UnlearningRevision | None):
+    """Revision 1 is the experiment config; a later revision replaces only the learning rate."""
+
+    method_config = _method_config(config, method)
+    return revision.method_config(config, method) if revision is not None else method_config
+
+
 def build_unlearning_trajectory_plan(
     *,
     config: PilotConfig,
@@ -805,6 +813,7 @@ def build_unlearning_trajectory_plan(
     method: str,
     examples: Sequence[dict[str, Any]],
     forget_examples_fingerprint: str | None = None,
+    revision: UnlearningRevision | None = None,
 ) -> UnlearningTrajectoryPlan:
     """Create the manifestable immutable plan before model weights are loaded."""
 
@@ -820,7 +829,7 @@ def build_unlearning_trajectory_plan(
     experiment_id = experiment_run_id(config)
     trajectory_id = stage_run_name(
         config,
-        "unlearned",
+        unlearning_stage(revision.tag if revision is not None else None),
         checkpoint_fraction=source.specialization_fraction,
         method=method,
         condition=source.condition,
@@ -852,9 +861,17 @@ def _plan_payload(
     source: ContaminatedSource,
     forget_examples_path: Path,
     forget_file_sha256: str,
+    revision: UnlearningRevision | None = None,
 ) -> dict[str, Any]:
-    method_config = _method_config(config, plan.method)
+    method_config = _effective_method_config(config, plan.method, revision)
+    # Revision 1 payloads carry no revision block, so they stay identical to those already written.
+    revision_block = (
+        {"unlearning_revision": {**revision.as_dict(), "fingerprint": revision.fingerprint, "path": revision.source_path}}
+        if revision is not None
+        else {}
+    )
     return {
+        **revision_block,
         "trajectory_run_id": plan.trajectory_run_id,
         "experiment_run_id": plan.experiment_run_id,
         "method": plan.method,
@@ -1196,7 +1213,7 @@ def _snapshot_manifest(
     payload = {
         "checkpoint_id": _snapshot_id(plan, step),
         "run_id": plan.trajectory_run_id,
-        "name": f"U_{source.name}_{plan.method}",
+        "name": f"{(plan_payload.get('unlearning_revision') or {}).get('tag', 'U')}_{source.name}_{plan.method}",
         "method": plan.method,
         "global_step": step,
         "snapshot_step": step,
@@ -1332,19 +1349,22 @@ def run_unlearning(
     dry_run: bool = False,
     resume: bool = False,
     overwrite: bool = False,
+    unlearning_revision_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run a complete, fixed GA or frozen-reference NPO trajectory from one C_i.
 
     The source must be a contamination-stage ``C0``, ``C50``, or ``C100``
     directory.  The supplied F JSONL is verified byte-for-byte and
     content-fingerprint-for-content-fingerprint against that source manifest
-    before any weights are loaded.
+    before any weights are loaded. ``unlearning_revision_path`` selects a later
+    revision (its own learning rate, trajectory, stage and labels).
     """
 
     settings = MachineSettings.from_env()
     config = load_config(config_path)
     validate_training_ready(config)
-    method_config = _method_config(config, method)
+    revision = load_unlearning_revision(unlearning_revision_path) if unlearning_revision_path else None
+    method_config = _effective_method_config(config, method, revision)
     layout = StorageLayout.for_config(config, settings)
     source = load_contaminated_source(contaminated_checkpoint_dir, config=config)
     forget_path, examples, forget_file_sha256, forget_fingerprint = _load_verified_forget_examples(
@@ -1358,6 +1378,7 @@ def run_unlearning(
         method=method,
         examples=examples,
         forget_examples_fingerprint=forget_fingerprint,
+        revision=revision,
     )
     plan_payload = _plan_payload(
         plan=plan,
@@ -1365,8 +1386,10 @@ def run_unlearning(
         source=source,
         forget_examples_path=forget_path,
         forget_file_sha256=forget_file_sha256,
+        revision=revision,
     )
-    stage = f"unlearn_{source.label_prefix}{source.name}_{method}"
+    revision_prefix = f"{revision.tag}_" if revision is not None else ""
+    stage = f"unlearn_{source.label_prefix}{revision_prefix}{source.name}_{method}"
     run_dir = (Path(output_dir) if output_dir else layout.unlearned_root) / plan.trajectory_run_id
     log_dir = layout.stage_dir(stage)
     hardware = precheck_gpu_training(settings, purpose=f"{method.upper()} unlearning")
@@ -1730,6 +1753,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Root for unlearning trajectories (default: <storage>/checkpoints/unlearned).",
     )
     parser.add_argument("--method", choices=("ga", "npo"), required=True)
+    parser.add_argument(
+        "--unlearning-revision",
+        default=None,
+        help="Revision file under configs/pilot/unlearning/ (default: revision 1 from --config).",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Continue a partially completed run.")
     parser.add_argument(
@@ -1749,6 +1777,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             resume=args.resume,
             overwrite=args.overwrite,
+            unlearning_revision_path=args.unlearning_revision,
         )
     except StageInterrupted as stopped:
         print(f"[unlearn] {stopped}. Rerun with --resume to continue.", file=sys.stderr, flush=True)

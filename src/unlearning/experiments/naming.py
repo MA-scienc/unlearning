@@ -45,6 +45,12 @@ def _experiment_identity_payload(config: PilotConfig) -> dict:
     }
 
 
+def unlearning_stage(revision_tag: str | None = None) -> str:
+    """Trajectory stage name: 'unlearned' for revision 1, 'unlearned_U2' (slug unlearned-u2) for later ones."""
+
+    return "unlearned" if revision_tag is None else f"unlearned_{revision_tag}"
+
+
 def stage_run_name(
     config: PilotConfig,
     stage: str,

@@ -28,9 +28,11 @@ from unlearning.runtime.run_log import utc_now
 from unlearning.runtime.settings import default_config_path
 from unlearning.utils.io import ensure_dir
 
+# Unlearned labels: U_C0_ga_step0400 is revision 1, U2_C0_ga_step0400 revision 2 (configs/pilot/unlearning/).
 _LABEL = re.compile(
     r"^(?:(?P<arm>[A-Z]+)_)?"
-    r"(?:(?P<clean>S)(?P<s>\d+)|(?P<cont>C)(?P<c>\d+)|U_C(?P<u>\d+)_(?P<method>[a-z]+)_step(?P<step>\d+))$"
+    r"(?:(?P<clean>S)(?P<s>\d+)|(?P<cont>C)(?P<c>\d+)"
+    r"|U(?P<revision>[2-9]|[1-9]\d+)?_C(?P<u>\d+)_(?P<method>[a-z]+)_step(?P<step>\d+))$"
 )
 ARM_BY_TAG = {"MM": "matched_memorization", "MR": "matched_memorization_replay"}
 # bias_removed_accuracy judges retention (protocol amendment 2026-11-05); raw accuracy is reported beside it.
@@ -56,6 +58,7 @@ FIELDS = (
     "arm",
     "specialization_level",
     "method",
+    "unlearning_revision",
     "unlearning_step",
     "suite",
     "metric",
@@ -78,14 +81,21 @@ def parse_label(label: str) -> dict[str, Any]:
     if match.group("clean"):
         if tag is not None:
             raise ValueError(f"Clean checkpoints have no contamination arm: {label!r}")
-        return {"family": "clean", "arm": None, "specialization_level": int(match.group("s")), "method": None, "unlearning_step": None}
+        return {
+            "family": "clean", "arm": None, "specialization_level": int(match.group("s")),
+            "method": None, "unlearning_revision": None, "unlearning_step": None,
+        }
     if match.group("cont"):
-        return {"family": "contaminated", "arm": arm, "specialization_level": int(match.group("c")), "method": None, "unlearning_step": 0}
+        return {
+            "family": "contaminated", "arm": arm, "specialization_level": int(match.group("c")),
+            "method": None, "unlearning_revision": None, "unlearning_step": 0,
+        }
     return {
         "family": "unlearned",
         "arm": arm,
         "specialization_level": int(match.group("u")),
         "method": match.group("method"),
+        "unlearning_revision": int(match.group("revision") or 1),
         "unlearning_step": int(match.group("step")),
     }
 
@@ -127,6 +137,7 @@ def _sort_key(row: dict[str, Any]):
     return (
         order[row["family"]],
         row["arm"] or "",
+        row["unlearning_revision"] or 0,
         row["specialization_level"],
         row["method"] or "",
         row["unlearning_step"] if row["unlearning_step"] is not None else -1,

@@ -27,12 +27,13 @@ class PipelinePlanTests(unittest.TestCase):
         jobs = self.pipeline().jobs()
         ids = [job.id for job in jobs]
         self.assertEqual(len(ids), len(set(ids)))
-        # 3 clean x 6 suites + 3 fixed C x 5 + 3 matched (replay) C x 5 + 30 unlearned snapshots x 5
-        self.assertEqual(sum(job.id.startswith("eval__") for job in jobs), 18 + 15 + 15 + 150)
+        # 3 clean x 6 suites + 3 fixed C x 5 + 3 matched (replay) C x 5 + 2 unlearning revisions x 30 snapshots x 5
+        self.assertEqual(sum(job.id.startswith("eval__") for job in jobs), 18 + 15 + 15 + 150 + 150)
         order = ["preflight", "gate0_data", "benchmark", "gate1_hardware", "specialize",
                  "gate2_specialization", "contaminate_C0", "prepare_replay_MR", "calibrate_MR",
                  "gate_calibration", "contaminate_MR_C0", "eval__MR_C0__forgetting", "gate3_memorization",
-                 "unlearn_MR_C100_npo", "eval__MR_U_C100_npo_step0400__near", "aggregate"]
+                 "unlearn_MR_C100_npo", "eval__MR_U_C100_npo_step0400__near",
+                 "unlearn_MR_U2_C0_ga", "eval__MR_U2_C100_npo_step0400__near", "aggregate"]
         self.assertFalse(any(job.id.startswith("unlearn_C") for job in jobs))  # fixed arm is not unlearned
         self.assertEqual([ids.index(name) for name in order], sorted(ids.index(name) for name in order))
         self.assertEqual({job.gate for job in jobs if job.kind == "gate"}, set(GATES))
@@ -62,6 +63,26 @@ class PipelinePlanTests(unittest.TestCase):
         self.assertFalse(jobs[f"prepare_replay_{arm.tag}"].done({}))
         write_json(path, {**manifest, "count": replay.prepared_sequences}, overwrite=True)
         self.assertTrue(jobs[f"prepare_replay_{arm.tag}"].done({}))
+
+    def test_unlearning_revision_adds_its_own_jobs_and_leaves_revision_1_unchanged(self):
+        jobs = {job.id: job for job in self.pipeline().jobs()}
+        base, revised = jobs["unlearn_MR_C50_npo"], jobs["unlearn_MR_U2_C50_npo"]
+        self.assertNotIn("--unlearning-revision", base.command)
+        flag = revised.command.index("--unlearning-revision")
+        self.assertEqual(Path(revised.command[flag + 1]).name, "revision2.yaml")
+        self.assertEqual((base.group, revised.group), ("unlearning", "unlearning_U2"))
+        self.assertIn("__unlearned__s050__", str(base.outputs[0]))
+        self.assertIn("__unlearned-u2__s050__", str(revised.outputs[0]))
+        self.assertEqual(jobs["eval__MR_U2_C50_npo_step0400__near"].group, "unlearned_eval_U2")
+        self.assertIn("__unlearned-u2__", jobs["eval__MR_U2_C50_npo_step0400__near"].command[-5])
+
+        with tempfile.TemporaryDirectory() as empty:
+            only_revision_1 = PilotPipeline(
+                config_path=CONFIG, runtime_path=LAPTOP, settings=self.settings, unlearning_revisions_dir=Path(empty)
+            ).jobs()
+        ids = [job.id for job in only_revision_1]
+        self.assertIn("unlearn_MR_C0_ga", ids)
+        self.assertFalse(any("U2" in job_id for job_id in ids))
 
     def test_only_download_jobs_are_online(self):
         online = [job.id for job in self.pipeline().jobs() if not job.offline]
