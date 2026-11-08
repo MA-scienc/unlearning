@@ -10,6 +10,10 @@
 # within max_steps (calibration on training probes only), then the same rate for every C_i.
 # Everything else is inherited unchanged from the experiment config (batch 16, clipping 1.0,
 # constant schedule, F order, NPO beta 0.1 with frozen C_i reference, no retain loss).
+#
+# max_steps raised 1000 -> 2000 at gate_unlearning_calibration (user decision, 2026-11-08): on
+# MR_C0 the selected 2e-6 reached 100% at steps 888 (GA) and 914 (NPO), 89-91% of the cap. Decided
+# from the C0 calibration only, before any C50/C100 run; the calibration was rerun under this file.
 revision: 3
 tag: U3
 mode: matched_forgetting
@@ -17,5 +21,5 @@ matched_forgetting:
   learning_rate_candidates: [2.0e-6, 5.0e-6, 1.0e-5, 2.0e-5]
   thresholds: [0.25, 0.50, 0.75, 1.00]
   check_every_steps: 2
-  max_steps: 1000
+  max_steps: 2000
   probe_templates: [condition_lookup, medication_lookup, private_code_lookup]

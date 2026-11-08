@@ -16,8 +16,10 @@ preflight ──► gate 0 ──► benchmark ──► gate 1 ──► specia
 
 The matched-memorization arm was added on 2026-10-25 and revised on 2026-11-01 (see the
 amendment log): the frozen fixed-exposure recipe did not make the 0.5B model memorize which
-fact belongs to which patient, and memorizing F by training on F alone caused catastrophic
-forgetting. Each S_i is now trained on F mixed with general replay text until it reaches the
+fact belongs to which patient, and memorizing F by training on F alone caused catastrophic           ,M.,,,
+
+'>""":
+forgetY7ng. Each S_i is now trained on F mixed with general replay text until it reaches the
 same recall on the training questions, with a learning rate calibrated once on C0.
 
 | Job | What it does | Measured on the RTX 4070 laptop (2026-10-24, Qwen2.5-0.5B) |
@@ -146,6 +148,13 @@ results/raw/<run_id>/<model>/      one JSON per evaluation suite (measured value
 results/processed/<run_id>/        metrics_long.csv, summary.md (built only from results/raw)
 results/figures/<run_id>/          figures (built only from logs and processed tables)
 ```
+
+**On the pilot laptop (since 2026-11-08), `checkpoints/unlearned` is a directory
+junction to `D:\Unlearning\checkpoints\unlearned` on the external USB SSD** (all 60
+revision-1/2 snapshots were copied there and verified against their manifest
+fingerprints before the C: copy was removed). Keep the SSD attached as `D:` whenever the
+pipeline runs: with it missing, unlearning jobs look unfinished and their snapshots
+cannot be evaluated. Nothing else changes; paths in manifests and results are unaffected.
 
 `<run_id>` encodes the experiment id, model, seed, F schema and a hash of the
 whole scientific config, so different configs can never write into each

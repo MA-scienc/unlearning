@@ -73,7 +73,9 @@ continuous log-prob gap instead of exact leakage, because leakage drops from 0.3
 - The actual g and step of every snapshot are recorded. A snapshot can overshoot its
   threshold by up to two steps' worth of movement; analysis uses the recorded g, not the
   nominal threshold.
-- **Cap: 1,000 steps.** A level that does not reach a threshold within the cap is reported
+- **Cap: 1,000 steps** (raised to **2,000** at the calibration gate, 2026-11-08: on MR_C0 the
+  selected rate needed 888/914 steps, 89–91% of 1,000; see the amendment log). A level that does
+  not reach a threshold within the cap is reported
   as "not reached". That is a finding, not a failure to hide, and its last snapshot is
   evaluated and labelled as such.
 - The step-0 point is C_i itself. Its evaluations already exist (MR_C_i) and are reused.

@@ -326,8 +326,10 @@ class UnlearningLineageTests(unittest.TestCase):
                 forget_file_sha256="c" * 64, revision=revision, learning_rate=5e-6, calibration_report_sha256="d" * 64,
             )
         self.assertTrue(plan.trajectory_run_id.endswith("__unlearned-u3__s050__fixed-exposure__ga"))
-        self.assertEqual((plan.snapshot_steps, plan.training_steps), ((), 1000))
-        self.assertEqual((payload["optimizer"]["learning_rate"], payload["method_config"]["steps"]), (5e-6, 1000))
+        self.assertEqual((plan.snapshot_steps, plan.training_steps), ((), revision.matched.max_steps))
+        self.assertEqual(
+            (payload["optimizer"]["learning_rate"], payload["method_config"]["steps"]), (5e-6, revision.matched.max_steps)
+        )
         record = payload["unlearning_revision"]
         self.assertEqual((record["selected_learning_rate"], record["calibration_report_sha256"]), (5e-6, "d" * 64))
         self.assertTrue(record["clean_counterfactual_used_for_stopping"])
