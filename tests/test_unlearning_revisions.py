@@ -24,7 +24,7 @@ class UnlearningRevisionTests(unittest.TestCase):
         revision = load_unlearning_revision(REVISIONS / "revision2.yaml")
         self.assertEqual((revision.revision, revision.tag), (2, "U2"))
         self.assertEqual(revision.learning_rates, {"ga": 2e-5, "npo": 2e-5})
-        self.assertEqual([r.revision for r in load_unlearning_revisions(REVISIONS)], [2])
+        self.assertEqual([r.revision for r in load_unlearning_revisions(REVISIONS)], [2, 3])
 
     def test_only_the_learning_rate_changes_and_the_run_id_does_not(self):
         config = PilotConfig.from_dict(minimal_config())

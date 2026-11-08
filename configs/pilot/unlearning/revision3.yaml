@@ -1,0 +1,21 @@
+# Unlearning revision 3 (2026-11-08): matched forgetting. Design approved by the user:
+# docs/MATCHED_FORGETTING_DESIGN.md. See docs/CONFIRMATORY_PROTOCOL.md, amendment log.
+#
+# Each matched C_i is unlearned until it has closed 25 / 50 / 75 / 100% of the gap between
+# C_i and its clean S_i in mean per-token answer log-prob on the training-template probes
+# below (never on held-out evaluation probes). A snapshot is saved at the first check past
+# each threshold; the run stops at 100% or at max_steps ("final" snapshot, not reached).
+#
+# Learning rate, per method, fixed rule: the smallest candidate that reaches 100% on MR_C0
+# within max_steps (calibration on training probes only), then the same rate for every C_i.
+# Everything else is inherited unchanged from the experiment config (batch 16, clipping 1.0,
+# constant schedule, F order, NPO beta 0.1 with frozen C_i reference, no retain loss).
+revision: 3
+tag: U3
+mode: matched_forgetting
+matched_forgetting:
+  learning_rate_candidates: [2.0e-6, 5.0e-6, 1.0e-5, 2.0e-5]
+  thresholds: [0.25, 0.50, 0.75, 1.00]
+  check_every_steps: 2
+  max_steps: 1000
+  probe_templates: [condition_lookup, medication_lookup, private_code_lookup]

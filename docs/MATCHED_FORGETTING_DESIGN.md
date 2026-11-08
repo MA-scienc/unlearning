@@ -1,6 +1,9 @@
 # Matched-Forgetting Unlearning (proposed revision 3)
 
-Status: **proposal, awaiting approval** (2026-11-08). Nothing in this document has been
+Status: **approved by the user on 2026-11-08** (section 8 as written; the S_i-for-stopping
+note in section 5 was added at approval). Implemented as unlearning revision 3
+(`configs/pilot/unlearning/revision3.yaml`); the operational choices made while implementing
+are marked in 3.6 and 7. Nothing in this document has been
 implemented or run. All numbers quoted as "measured" come from the pilot run
 `pilot-medical-s0-s50-s100-qwen05b__qwen-qwen2-5-0-5b__seed42__synthetic-patient-f-v2__cfg2396728f114a`
 (one seed, Qwen2.5-0.5B).
@@ -126,9 +129,14 @@ nonsense. Two measures are added:
    those 16 positions. 0 means U_i predicts exactly like the clean model at the moment of
    answering. Computed for C_i and every U_i snapshot.
 2. **Degenerate-output rate:** the share of a model's saved forgetting-probe generations whose
-   distinct-bigram ratio (unique bigrams / bigrams) is below 0.5, for example "stable stable
-   stable". It is computed from generations already saved, so it can be added for revisions 1
-   and 2 too, and for S_i and C_i as references.
+   distinct *character 4-gram* ratio (unique 4-grams / 4-grams) is below 0.2, for example
+   "stable stable stable" or "chronchronchron". It is computed from generations already saved,
+   so it is added for revisions 1 and 2 too, and for S_i and C_i as references.
+   *Operationalization fixed at implementation (2026-11-08), before any revision-3 output
+   existed:* the proposed word-bigram ratio < 0.5 missed junk without spaces (it flagged 0% of
+   revision-2 GA C100's `\D\D\D…` outputs). On existing outputs, character 4-grams < 0.2 flag
+   0.7–1.8% of contaminated and revision-1 generations, 1.0–1.8% of S50/S100, 9.4% of S0 (genuine
+   base-model repetition loops), and 80–100% of revision-2 junk.
 
 Both are new measurements and both are secondary. They are reported, not used for stopping or
 selection.
@@ -152,6 +160,12 @@ selection.
   acceptable because the signal uses only training-template probes, thresholds and rules are
   fixed in advance, and every threshold snapshot is evaluated (no choosing among snapshots
   afterwards). The held-out matching check (3.5) tests whether the stopping signal transfers.
+- **S_i informs the stopping point, not the training.** ℓ(S_i) defines when a run stops, as
+  the target recall defined when contamination stopped. S_i never enters the GA/NPO objective
+  (NPO's reference stays the frozen C_i). A real unlearner would not have S_i, so this is a
+  measurement device for comparing levels at equal forgetting, not a deployable recipe.
+  Manifests record `clean_counterfactual_used_as_reference: false` and
+  `clean_counterfactual_used_for_stopping: true`.
 - **Matching the mean, not the distribution.** Equal mean log-prob does not guarantee that the
   same records are forgotten. Per-record gap distributions are reported alongside.
 - **The rate is calibrated on C0 only.** As with contamination, C50 and C100 may sit
@@ -187,8 +201,12 @@ selection.
 | Rate calibration on MR_C0 (both methods, up to 4 candidates) | under 1 h |
 | Six matched-forgetting runs (stop at g = 1, at most 1,000 steps) | 1–2 h |
 | Evaluations: 24 snapshots × 5 suites | about 8 h |
-| Closeness measure: 24 snapshots + 3 C_i + cached S_i continuations | about 2 h |
-| Total running time | about 12 h, plus implementation |
+| Closeness measure: up to 30 snapshots + 3 C_i (about 6 min each, measured in the smoke test) | about 3.5 h |
+| Total running time | about 13–14 h |
+
+Measured in the GPU smoke test (throwaway revision 9, MR_C0, 2e-5, 30-step cap; not a result): one
+2-step interval including the forgetting check takes about 2 s, so a 1,000-step trial takes about
+17 min; each snapshot is 1.9 GB on disk.
 
 ## 8. Decisions for approval
 

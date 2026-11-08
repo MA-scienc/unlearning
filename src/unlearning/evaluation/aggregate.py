@@ -28,12 +28,18 @@ from unlearning.runtime.run_log import utc_now
 from unlearning.runtime.settings import default_config_path
 from unlearning.utils.io import ensure_dir
 
-# Unlearned labels: U_C0_ga_step0400 is revision 1, U2_C0_ga_step0400 revision 2 (configs/pilot/unlearning/).
+# Unlearned labels: U_C0_ga_step0400 is revision 1, U2_C0_ga_step0400 revision 2, and matched-forgetting
+# revisions name snapshots by threshold: U3_C0_ga_f050 (50% of the gap to S_i closed) or U3_C0_ga_final
+# (step cap reached first). See configs/pilot/unlearning/.
 _LABEL = re.compile(
     r"^(?:(?P<arm>[A-Z]+)_)?"
     r"(?:(?P<clean>S)(?P<s>\d+)|(?P<cont>C)(?P<c>\d+)"
-    r"|U(?P<revision>[2-9]|[1-9]\d+)?_C(?P<u>\d+)_(?P<method>[a-z]+)_step(?P<step>\d+))$"
+    r"|U(?P<revision>[2-9]|[1-9]\d+)?_C(?P<u>\d+)_(?P<method>[a-z]+)_(?:step(?P<step>\d+)|f(?P<threshold>\d{3})|(?P<final>final)))$"
 )
+# A generation counts as degenerate when under 20% of its character 4-grams are distinct ("stable stable
+# ...", "chronchron..."). Fixed 2026-11-08 on existing S/C/revision-2 outputs, before any revision-3 output.
+DEGENERATE_NGRAM = 4
+DEGENERATE_DISTINCT_RATIO = 0.2
 ARM_BY_TAG = {"MM": "matched_memorization", "MR": "matched_memorization_replay"}
 # bias_removed_accuracy judges retention (protocol amendment 2026-11-05); raw accuracy is reported beside it.
 RETENTION_METRICS = ("bias_removed_accuracy", "accuracy", "mean_nll", "mean_correct_logprob")
@@ -60,6 +66,7 @@ FIELDS = (
     "method",
     "unlearning_revision",
     "unlearning_step",
+    "forgetting_threshold",
     "suite",
     "metric",
     "value",
@@ -83,21 +90,45 @@ def parse_label(label: str) -> dict[str, Any]:
             raise ValueError(f"Clean checkpoints have no contamination arm: {label!r}")
         return {
             "family": "clean", "arm": None, "specialization_level": int(match.group("s")),
-            "method": None, "unlearning_revision": None, "unlearning_step": None,
+            "method": None, "unlearning_revision": None, "unlearning_step": None, "forgetting_threshold": None,
         }
     if match.group("cont"):
         return {
             "family": "contaminated", "arm": arm, "specialization_level": int(match.group("c")),
-            "method": None, "unlearning_revision": None, "unlearning_step": 0,
+            "method": None, "unlearning_revision": None, "unlearning_step": 0, "forgetting_threshold": 0.0,
         }
+    threshold = match.group("threshold")
     return {
         "family": "unlearned",
         "arm": arm,
         "specialization_level": int(match.group("u")),
         "method": match.group("method"),
         "unlearning_revision": int(match.group("revision") or 1),
-        "unlearning_step": int(match.group("step")),
+        # Matched-forgetting snapshots get their step from their manifest (training_probe rows).
+        "unlearning_step": int(match.group("step")) if match.group("step") else None,
+        "forgetting_threshold": int(threshold) / 100 if threshold else ("final" if match.group("final") else None),
     }
+
+
+def is_degenerate(text: str) -> bool:
+    stripped = text.strip()
+    if len(stripped) < 2 * DEGENERATE_NGRAM:
+        return False
+    grams = [stripped[i : i + DEGENERATE_NGRAM] for i in range(len(stripped) - DEGENERATE_NGRAM + 1)]
+    return len(set(grams)) / len(grams) < DEGENERATE_DISTINCT_RATIO
+
+
+def _snapshot_progress(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Gap closed on training probes and step recorded in a matched-forgetting snapshot's manifest."""
+
+    manifest_path = (payload.get("checkpoint_provenance") or {}).get("manifest_path")
+    if not manifest_path or not Path(manifest_path).is_file():
+        return None
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    progress = manifest.get("forgetting_progress")
+    if not progress:
+        return None
+    return {"training_probe_gap_closed": progress.get("gap_closed"), "snapshot_step": manifest.get("snapshot_step")}
 
 
 def retention_measures(payload: dict[str, Any], *, seed: int) -> dict[str, tuple[Any, Any, Any]]:
@@ -126,6 +157,26 @@ def rows_for_file(run_id: str, path: Path, *, seed: int) -> list[dict[str, Any]]
         summary = rescore_forgetting_payload(payload)["summary"]
         for metric in FORGETTING_METRICS:
             rows.append({**base, "metric": metric, "value": summary.get(metric), "ci_low": None, "ci_high": None, "n": summary.get("record_count")})
+        texts = [record.get("generated_text") for record in payload.get("records") or [] if record.get("generated_text") is not None]
+        if texts:
+            rate = sum(is_degenerate(text) for text in texts) / len(texts)
+            rows.append({**base, "metric": "degenerate_output_rate", "value": rate, "ci_low": None, "ci_high": None, "n": len(texts)})
+        for metric, value in (_snapshot_progress(payload) or {}).items():
+            rows.append({**base, "metric": metric, "value": value, "ci_low": None, "ci_high": None, "n": None})
+    elif suite == "closeness":
+        summary = payload["summary"]
+        ci = summary.get("kl_to_clean_answer_start_ci95") or [None, None]
+        for metric in ("kl_to_clean_answer_start", "kl_to_clean_first_token"):
+            rows.append(
+                {
+                    **base,
+                    "metric": metric,
+                    "value": summary.get(metric),
+                    "ci_low": ci[0] if metric == "kl_to_clean_answer_start" else None,
+                    "ci_high": ci[1] if metric == "kl_to_clean_answer_start" else None,
+                    "n": summary.get("record_count"),
+                }
+            )
     else:
         for metric, (value, low, high) in retention_measures(payload, seed=seed).items():
             rows.append({**base, "metric": metric, "value": value, "ci_low": low, "ci_high": high, "n": payload.get("count")})
@@ -141,15 +192,43 @@ def _sort_key(row: dict[str, Any]):
         row["specialization_level"],
         row["method"] or "",
         row["unlearning_step"] if row["unlearning_step"] is not None else -1,
+        # thresholds 0.25 ... 1.0, then "final" (cap reached first)
+        2.0 if row["forgetting_threshold"] == "final" else (row["forgetting_threshold"] or 0.0),
         row["suite"],
         row["metric"],
     )
+
+
+def heldout_gap_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Gap closed on the held-out forgetting probes, (lp_C - lp_U) / (lp_C - lp_S), per unlearned model.
+
+    The same quantity the matched-forgetting runs stop on, but on templates never used for stopping,
+    so it shows whether matching carried over equally at every level (design 3.5).
+    """
+
+    logprob = {
+        row["model"]: row["value"] for row in rows if row["suite"] == "forgetting" and row["metric"] == "target_logprob"
+    }
+    derived = []
+    for row in rows:
+        if row["family"] != "unlearned" or row["suite"] != "forgetting" or row["metric"] != "target_logprob":
+            continue
+        tag = next(key for key, name in ARM_BY_TAG.items() if name == row["arm"]) if row["arm"] in ARM_BY_TAG.values() else None
+        level = row["specialization_level"]
+        contaminated = logprob.get(f"{tag}_C{level}" if tag else f"C{level}")
+        clean = logprob.get(f"S{level}")
+        if contaminated is None or clean is None or row["value"] is None or not contaminated > clean:
+            continue
+        value = (contaminated - row["value"]) / (contaminated - clean)
+        derived.append({**row, "metric": "heldout_gap_closed", "value": value, "ci_low": None, "ci_high": None})
+    return derived
 
 
 def aggregate(raw_dir: Path, processed_dir: Path, run_id: str, *, seed: int) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for path in sorted(raw_dir.glob("*/*.json")):
         rows.extend(rows_for_file(run_id, path, seed=seed))
+    rows.extend(heldout_gap_rows(rows))
     rows.sort(key=_sort_key)
     ensure_dir(processed_dir)
     with (processed_dir / "metrics_long.csv").open("w", encoding="utf-8", newline="") as handle:

@@ -37,6 +37,22 @@ def teacher_forced_exact(logits, labels, ignore_index: int = IGNORE_INDEX):
     return correct_or_unsupervised.all(dim=1) & supervised.any(dim=1)
 
 
+def answer_token_logprob_means(logits, labels, ignore_index: int = IGNORE_INDEX):
+    """Per example: mean log-probability of its supervised (answer) tokens.
+
+    Log-softmax is taken only at answer positions, so no full-vocabulary float copy
+    of the batch logits is made (matters on 8 GB next to a model in training).
+    """
+
+    targets = labels[:, 1:]
+    supervised = targets.ne(ignore_index)
+    rows = logits[:, :-1, :][supervised].float()
+    token_logprobs = rows.log_softmax(dim=-1).gather(-1, targets[supervised].unsqueeze(-1)).squeeze(-1)
+    example_of_token = supervised.nonzero()[:, 0]
+    sums = token_logprobs.new_zeros(labels.shape[0]).index_add_(0, example_of_token, token_logprobs)
+    return sums / supervised.sum(dim=1).clamp(min=1)
+
+
 class MemorizationProbe:
     def __init__(
         self,
@@ -61,6 +77,7 @@ class MemorizationProbe:
             for example in selected
         ]
         self.template_of = [example["template_id"] for example in selected]
+        self.example_ids = [str(example["example_id"]) for example in selected]
         self.fingerprint = fingerprint_records(
             [{"example_id": example["example_id"], "template_id": example["template_id"]} for example in selected]
         )
@@ -93,6 +110,38 @@ class MemorizationProbe:
             "mean_recall": sum(by_template.values()) / len(by_template),
             "by_template": by_template,
             "probe_count": len(self.encoded),
+        }
+
+    def answer_logprob(self, model, device) -> dict[str, Any]:
+        """Teacher-forced mean per-token answer log-probability: overall, per template, per example.
+
+        The matched-forgetting stopping signal (docs/MATCHED_FORGETTING_DESIGN.md, 3.1).
+        """
+
+        torch = self.torch
+        was_training = model.training
+        model.eval()
+        values: list[float] = []
+        with torch.inference_mode():
+            for start in range(0, len(self.encoded), self.batch_size):
+                chunk = self.encoded[start : start + self.batch_size]
+                batch = collate_completion_batch(chunk, pad_token_id=self.pad_token_id)
+                input_ids = torch.tensor(batch["input_ids"], dtype=torch.long, device=device)
+                attention_mask = torch.tensor(batch["attention_mask"], dtype=torch.long, device=device)
+                labels = torch.tensor(batch["labels"], dtype=torch.long, device=device)
+                with autocast_context(torch, device):
+                    logits = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).logits
+                values.extend(float(value) for value in answer_token_logprob_means(logits, labels).cpu())
+        if was_training:
+            model.train()
+        grouped: dict[str, list[float]] = defaultdict(list)
+        for template, value in zip(self.template_of, values):
+            grouped[template].append(value)
+        return {
+            "mean": sum(values) / len(values),
+            "by_template": {template: sum(v) / len(v) for template, v in sorted(grouped.items())},
+            "per_example": dict(zip(self.example_ids, values)),
+            "probe_count": len(values),
         }
 
 

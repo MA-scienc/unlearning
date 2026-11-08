@@ -305,6 +305,35 @@ class UnlearningLineageTests(unittest.TestCase):
         self.assertEqual(revised_payload["unlearning_revision"]["tag"], "U2")
         self.assertEqual(revised_payload["unlearning_revision"]["fingerprint"], revision.fingerprint)
 
+    def test_matched_forgetting_plan_uses_the_cap_and_records_the_calibrated_rate(self):
+        from unlearning.config.unlearning_revisions import load_unlearning_revision
+        from unlearning.runtime.settings import REPO_ROOT
+        from unlearning.training.unlearn import _plan_payload
+
+        revision = load_unlearning_revision(REPO_ROOT / "configs" / "pilot" / "unlearning" / "revision3.yaml")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = load_contaminated_source(self._contaminated_source(Path(temporary_directory)), config=self.config)
+            examples = validate_forget_examples(
+                [{"example_id": "PX-1::a", "record_id": "PX-1", "template_id": "a", "split": "contamination",
+                  "prompt": "P", "completion": " C", "text": "P C"}]
+            )
+            plan = build_unlearning_trajectory_plan(
+                config=self.config, source=source, method="ga", examples=examples,
+                forget_examples_fingerprint="b" * 64, revision=revision,
+            )
+            payload = _plan_payload(
+                plan=plan, config=self.config, source=source, forget_examples_path=Path("f.jsonl"),
+                forget_file_sha256="c" * 64, revision=revision, learning_rate=5e-6, calibration_report_sha256="d" * 64,
+            )
+        self.assertTrue(plan.trajectory_run_id.endswith("__unlearned-u3__s050__fixed-exposure__ga"))
+        self.assertEqual((plan.snapshot_steps, plan.training_steps), ((), 1000))
+        self.assertEqual((payload["optimizer"]["learning_rate"], payload["method_config"]["steps"]), (5e-6, 1000))
+        record = payload["unlearning_revision"]
+        self.assertEqual((record["selected_learning_rate"], record["calibration_report_sha256"]), (5e-6, "d" * 64))
+        self.assertTrue(record["clean_counterfactual_used_for_stopping"])
+        self.assertFalse(payload["source_contaminated_checkpoint"]["clean_counterfactual_used_as_reference"])
+        self.assertIn("forgetting thresholds", payload["trajectory"]["posthoc_checkpoint_selection"])
+
     def test_rejects_a_tampered_contaminated_model_artifact(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             source_path = self._contaminated_source(Path(temporary_directory))

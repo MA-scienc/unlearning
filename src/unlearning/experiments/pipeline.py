@@ -28,10 +28,14 @@ from typing import Any, Callable
 
 from unlearning.config import PilotConfig, load_config
 from unlearning.config.arms import load_matched_memorization_arm
-from unlearning.config.unlearning_revisions import UnlearningRevision, load_unlearning_revisions
+from unlearning.config.unlearning_revisions import CAP_SNAPSHOT, UnlearningRevision, load_unlearning_revisions
 from unlearning.data.replay import replay_corpus_prepared, replay_dir
 from unlearning.evaluation.aggregate import retention_measures
 from unlearning.evaluation.forgetting import rescore_forgetting_payload
+from unlearning.training.matched_forgetting import (
+    calibration_complete as unlearning_calibration_complete,
+    calibration_report_path as unlearning_calibration_report_path,
+)
 from unlearning.training.matched_contamination import (
     DEFAULT_ARM_PATH,
     FINAL_CALIBRATION_STATES,
@@ -65,6 +69,7 @@ GATES = {
     "gate2_specialization": "Specialization review: did domain performance move from S0 to S100?",
     "gate_calibration": "Calibration review: which contamination learning rate memorizes F without collateral damage?",
     "gate3_memorization": "Memorization review: is F memorized, and matched, in the matched C0/C50/C100?",
+    "gate_unlearning_calibration": "Unlearning calibration review: which learning rate reaches matched forgetting on MR_C0?",
 }
 
 
@@ -119,6 +124,15 @@ class ModelRef:
     model: str
     manifest: Path
     family: str
+    # Matched forgetting: a threshold snapshot exists only if the run reached it (or, for
+    # "final", if it hit the step cap). Once the run's manifest exists, absence means skip.
+    produced_by: Path | None = None
+    snapshot_name: str | None = None
+
+    def not_produced(self) -> bool:
+        if self.produced_by is None or not self.produced_by.is_file():
+            return False
+        return self.snapshot_name not in (read_json(self.produced_by).get("snapshot_paths") or {})
 
 
 class PilotPipeline:
@@ -227,6 +241,21 @@ class PilotPipeline:
                 trajectory = self.layout.unlearning_trajectory(
                     self.config, contaminated, method, condition=self.arm.name, revision_tag=tag
                 )
+                if revision is not None and revision.is_matched:
+                    # Matched forgetting: f025 ... f100 by threshold, plus "final" if the cap came first.
+                    for name in (*revision.matched.snapshot_names, CAP_SNAPSHOT):
+                        snapshot = trajectory / name
+                        refs.append(
+                            ModelRef(
+                                f"{self.arm.tag}_{tag}_{contaminated}_{method}_{name}",
+                                str(snapshot),
+                                snapshot / "manifest.json",
+                                "unlearned",
+                                produced_by=trajectory / "run_manifest.json",
+                                snapshot_name=name,
+                            )
+                        )
+                    continue
                 for step in self.config.unlearning.snapshot_steps:
                     snapshot = trajectory / f"step{step:04d}"
                     refs.append(
@@ -246,6 +275,26 @@ class PilotPipeline:
         prefix, suffix = (f"{tag}_", f"_{tag}") if tag else ("", "")
         revision_args = ["--unlearning-revision", str(revision.source_path)] if revision is not None else []
         jobs = []
+        if revision is not None and revision.is_matched:
+            # The learning rate is chosen on MR_C0 by a fixed rule and reviewed before any run.
+            jobs += [
+                Job(
+                    id=f"calibrate_unlearning_{tag}",
+                    group=f"unlearning{suffix}",
+                    title=f"unlearning learning-rate calibration ({tag}) on MR_C0: gap closed on training probes",
+                    kind="command",
+                    command=self._python("calibrate_unlearning.py", "--runtime", str(self.runtime_path), *revision_args),
+                    outputs=(unlearning_calibration_report_path(self.layout, revision),),
+                    done_check=lambda: unlearning_calibration_complete(self.layout, revision),
+                ),
+                Job(
+                    id="gate_unlearning_calibration",
+                    group=f"unlearning{suffix}",
+                    title=GATES["gate_unlearning_calibration"],
+                    kind="gate",
+                    gate="gate_unlearning_calibration",
+                ),
+            ]
         for contaminated in CONTAMINATED:
             for method in METHODS:
                 trajectory = self.layout.unlearning_trajectory(
@@ -268,7 +317,40 @@ class PilotPipeline:
                         outputs=(trajectory / "run_manifest.json",),
                     )
                 )
-        return jobs + self._eval_jobs(f"unlearned_eval{suffix}", self.unlearned_models(revision))
+        jobs += self._eval_jobs(f"unlearned_eval{suffix}", self.unlearned_models(revision))
+        if revision is not None and revision.is_matched:
+            jobs += self._closeness_jobs(f"unlearned_eval{suffix}", self.matched_contaminated_models() + self.unlearned_models(revision))
+        return jobs
+
+    def _closeness_jobs(self, group: str, models: list[ModelRef]) -> list[Job]:
+        """Answer-start divergence from the clean S_i on the held-out forgetting prompts (design 3.6)."""
+
+        clean = {ref.label: ref for ref in self.clean_models()}
+        jobs = []
+        for ref in models:
+            level = ref.label.split("_C", 1)[1].split("_", 1)[0]
+            parent = clean[f"S{level}"]
+            output = self.result_path(ref.label, "closeness")
+            jobs.append(
+                Job(
+                    id=f"eval__{ref.label}__closeness",
+                    group=group,
+                    title=f"closeness of {ref.label} to S{level}",
+                    kind="command",
+                    command=self._python(
+                        "evaluate_closeness.py",
+                        "--dataset", str(self.layout.generated / "forget" / "forget_eval_examples.jsonl"),
+                        "--model", ref.model,
+                        "--checkpoint-manifest", str(ref.manifest),
+                        "--clean-model", parent.model,
+                        "--clean-manifest", str(parent.manifest),
+                        "--output", str(output),
+                    ),
+                    outputs=(output,),
+                    done_check=lambda output=output, ref=ref: output.is_file() or ref.not_produced(),
+                )
+            )
+        return jobs
 
     def _eval_jobs(self, group: str, models: list[ModelRef]) -> list[Job]:
         jobs = []
@@ -293,6 +375,11 @@ class PilotPipeline:
                         kind="command",
                         command=command,
                         outputs=(output,),
+                        done_check=(
+                            (lambda output=output, ref=ref: output.is_file() or ref.not_produced())
+                            if ref.produced_by is not None
+                            else None
+                        ),
                     )
                 )
         return jobs
@@ -865,6 +952,40 @@ def write_gate_report(pipeline: PilotPipeline, gate: str) -> Path:
             "- Held-out probes: target leakage / likelihood / decoy margin clearly above S_i. Recall on the",
             "  training questions is matched by design; held-out generalization may still differ by level.",
             "- The steps each C_i needed are a finding (learnability), not a failure.",
+        ]
+    elif gate == "gate_unlearning_calibration":
+        revision = next(r for r in pipeline.unlearning_revisions if r is not None and r.is_matched)
+        report = _read(unlearning_calibration_report_path(layout, revision)) or {}
+        references = report.get("references") or {}
+        names = revision.matched.snapshot_names
+        lines += [
+            f"## Rule ({revision.tag}, docs/MATCHED_FORGETTING_DESIGN.md 3.3)",
+            f"- {report.get('selection_rule', 'n/a')}",
+            f"- candidates {list(revision.matched.learning_rate_candidates)}; check every "
+            f"{revision.matched.check_every_steps} steps; cap {revision.matched.max_steps} steps",
+            f"- forgetting gap on MR_C0's training-template probes: l(C0) "
+            f"{_fmt((references.get('contaminated') or {}).get('mean'), 4)} -> l(S0) "
+            f"{_fmt((references.get('clean') or {}).get('mean'), 4)} (gap {_fmt(references.get('gap'), 4)})",
+            "",
+        ]
+        for method, record in (report.get("methods") or {}).items():
+            lines += [
+                f"## {method.upper()}: {record.get('status')}, selected learning rate {record.get('selected_learning_rate')}",
+                "",
+                "| learning rate | " + " | ".join(f"step reaching {name}" for name in names) + " | steps run | last gap closed | diverged |",
+                "|---|" + "---|" * (len(names) + 3),
+            ]
+            for trial in record.get("trials") or []:
+                reached = trial.get("reached") or {}
+                cells = [str((reached.get(name) or {}).get("step", "-")) for name in names]
+                lines.append(
+                    f"| {trial['learning_rate']:g} | " + " | ".join(cells)
+                    + f" | {trial.get('steps_run')} | {_fmt((trial.get('last_check') or {}).get('gap_closed'))} | {trial.get('diverged')} |"
+                )
+            lines.append("")
+        lines += [
+            f"Status: **{report.get('status')}**. Only gap closed on training probes was measured: no",
+            "retention, damage or held-out probe entered the choice.",
         ]
     path = pipeline.gate_report_path(gate)
     ensure_dir(path.parent)

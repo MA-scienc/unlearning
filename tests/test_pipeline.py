@@ -27,13 +27,16 @@ class PipelinePlanTests(unittest.TestCase):
         jobs = self.pipeline().jobs()
         ids = [job.id for job in jobs]
         self.assertEqual(len(ids), len(set(ids)))
-        # 3 clean x 6 suites + 3 fixed C x 5 + 3 matched (replay) C x 5 + 2 unlearning revisions x 30 snapshots x 5
-        self.assertEqual(sum(job.id.startswith("eval__") for job in jobs), 18 + 15 + 15 + 150 + 150)
+        # 3 clean x 6 suites + 3 fixed C x 5 + 3 matched (replay) C x 5 + 2 fixed-budget revisions x 30
+        # snapshots x 5 + matched forgetting (6 runs x 5 snapshots x 5 suites, closeness for 3 C_i + 30)
+        self.assertEqual(sum(job.id.startswith("eval__") for job in jobs), 18 + 15 + 15 + 150 + 150 + 150 + 33)
         order = ["preflight", "gate0_data", "benchmark", "gate1_hardware", "specialize",
                  "gate2_specialization", "contaminate_C0", "prepare_replay_MR", "calibrate_MR",
                  "gate_calibration", "contaminate_MR_C0", "eval__MR_C0__forgetting", "gate3_memorization",
                  "unlearn_MR_C100_npo", "eval__MR_U_C100_npo_step0400__near",
-                 "unlearn_MR_U2_C0_ga", "eval__MR_U2_C100_npo_step0400__near", "aggregate"]
+                 "unlearn_MR_U2_C0_ga", "eval__MR_U2_C100_npo_step0400__near",
+                 "calibrate_unlearning_U3", "gate_unlearning_calibration", "unlearn_MR_U3_C0_ga",
+                 "eval__MR_U3_C100_npo_f100__near", "eval__MR_U3_C100_npo_final__closeness", "aggregate"]
         self.assertFalse(any(job.id.startswith("unlearn_C") for job in jobs))  # fixed arm is not unlearned
         self.assertEqual([ids.index(name) for name in order], sorted(ids.index(name) for name in order))
         self.assertEqual({job.gate for job in jobs if job.kind == "gate"}, set(GATES))
@@ -83,6 +86,64 @@ class PipelinePlanTests(unittest.TestCase):
         ids = [job.id for job in only_revision_1]
         self.assertIn("unlearn_MR_C0_ga", ids)
         self.assertFalse(any("U2" in job_id for job_id in ids))
+
+    def test_matched_forgetting_revision_calibrates_gates_and_skips_unreached_thresholds(self):
+        from unlearning.utils.io import write_json
+
+        pipeline = self.pipeline()
+        jobs = {job.id: job for job in pipeline.jobs()}
+        calibrate = jobs["calibrate_unlearning_U3"]
+        self.assertIn("calibrate_unlearning.py", " ".join(calibrate.command))
+        self.assertEqual(Path(calibrate.command[calibrate.command.index("--unlearning-revision") + 1]).name, "revision3.yaml")
+        self.assertNotIn("accelerate.commands.launch", calibrate.command)
+        self.assertEqual(jobs["gate_unlearning_calibration"].gate, "gate_unlearning_calibration")
+        self.assertIn("__unlearned-u3__s000__", str(jobs["unlearn_MR_U3_C0_ga"].outputs[0]))
+        closeness = jobs["eval__MR_U3_C50_npo_f050__closeness"].command
+        self.assertIn("evaluate_closeness.py", " ".join(closeness))
+        self.assertTrue(closeness[closeness.index("--clean-manifest") + 1].endswith(str(Path("S50") / "manifest.json")))
+        self.assertIn("eval__MR_C100__closeness", jobs)
+
+        # Before the run: not done. After it: f100 not reached -> its evaluations are skipped, final runs.
+        f100, final = jobs["eval__MR_U3_C0_ga_f100__near"], jobs["eval__MR_U3_C0_ga_final__near"]
+        self.assertFalse(f100.done({}))
+        run_manifest = jobs["unlearn_MR_U3_C0_ga"].outputs[0]
+        write_json(run_manifest, {"snapshot_paths": {"f025": "x", "f050": "x", "f075": "x", "final": "x"}})
+        self.assertTrue(f100.done({}))
+        self.assertTrue(jobs["eval__MR_U3_C0_ga_f100__closeness"].done({}))
+        self.assertFalse(final.done({}))
+
+    def test_unlearning_calibration_gate_report(self):
+        from unlearning.experiments.pipeline import write_gate_report
+        from unlearning.training.matched_forgetting import calibration_report_path
+        from unlearning.utils.io import write_json
+
+        pipeline = self.pipeline()
+        revision = pipeline.unlearning_revisions[-1]
+        write_json(
+            calibration_report_path(pipeline.layout, revision),
+            {
+                "status": "selected",
+                "selection_rule": "smallest candidate reaching 1.0",
+                "references": {"clean": {"mean": -4.2}, "contaminated": {"mean": -0.06}, "gap": 4.14},
+                "methods": {
+                    "ga": {
+                        "status": "selected",
+                        "selected_learning_rate": 5e-6,
+                        "trials": [
+                            {"learning_rate": 2e-6, "reached": {"f025": {"step": 300}}, "steps_run": 1000,
+                             "last_check": {"gap_closed": 0.4}, "diverged": False},
+                            {"learning_rate": 5e-6, "reached": {name: {"step": 40 * i} for i, name in enumerate(("f025", "f050", "f075", "f100"), 1)},
+                             "steps_run": 160, "last_check": {"gap_closed": 1.02}, "diverged": False},
+                        ],
+                    }
+                },
+            },
+        )
+        text = write_gate_report(pipeline, "gate_unlearning_calibration").read_text(encoding="utf-8")
+        self.assertIn("## GA: selected, selected learning rate 5e-06", text)
+        self.assertIn("| 2e-06 | 300 | - | - | - | 1000 | 0.400 | False |", text)
+        self.assertIn("| 5e-06 | 40 | 80 | 120 | 160 | 160 | 1.020 | False |", text)
+        self.assertIn("gap 4.1400", text)
 
     def test_only_download_jobs_are_online(self):
         online = [job.id for job in self.pipeline().jobs() if not job.offline]

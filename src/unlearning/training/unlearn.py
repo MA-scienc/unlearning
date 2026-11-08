@@ -28,7 +28,7 @@ from time import perf_counter
 from typing import Any, Iterable, Sequence
 
 from unlearning.config import PilotConfig, load_config, validate_training_ready
-from unlearning.config.unlearning_revisions import UnlearningRevision, load_unlearning_revision
+from unlearning.config.unlearning_revisions import CAP_SNAPSHOT, UnlearningRevision, load_unlearning_revision
 from unlearning.experiments.naming import experiment_run_id, stage_run_name, unlearning_stage
 from unlearning.runtime.hardware import (
     precheck_gpu_training,
@@ -62,6 +62,14 @@ from unlearning.runtime.stage import (
 )
 from unlearning.training.contaminate import CONTAMINATION_MANIFEST_SCHEMA
 from unlearning.training.matched_contamination import MATCHED_CONTAMINATION_MANIFEST_SCHEMA
+from unlearning.training.matched_forgetting import (
+    REFERENCES_FILE,
+    ForgettingMonitor,
+    clean_parent,
+    load_or_measure_references,
+    selected_learning_rate,
+)
+from unlearning.training.memorization import MemorizationProbe
 from unlearning.training.engine import (
     MicroBatch,
     TrainingLoop,
@@ -799,11 +807,16 @@ def _method_config(config: PilotConfig, method: str):
     return config.unlearning.methods[method]
 
 
-def _effective_method_config(config: PilotConfig, method: str, revision: UnlearningRevision | None):
-    """Revision 1 is the experiment config; a later revision replaces only the learning rate."""
+def _effective_method_config(
+    config: PilotConfig, method: str, revision: UnlearningRevision | None, learning_rate: float | None = None
+):
+    """Revision 1 is the experiment config; a later revision replaces the learning rate
+    (and, for matched forgetting, the step cap), with the calibrated rate passed in."""
 
     method_config = _method_config(config, method)
-    return revision.method_config(config, method) if revision is not None else method_config
+    if revision is None:
+        return method_config
+    return revision.method_config(config, method, learning_rate=learning_rate)
 
 
 def build_unlearning_trajectory_plan(
@@ -818,12 +831,20 @@ def build_unlearning_trajectory_plan(
     """Create the manifestable immutable plan before model weights are loaded."""
 
     method_config = _method_config(config, method)
-    snapshots = snapshot_schedule_for_method(config, method)
+    if revision is not None and revision.is_matched:
+        # Matched forgetting: snapshots are taken at forgetting thresholds, not fixed steps.
+        if config.unlearning.retain_loss_weight != 0.0:
+            raise ValueError("The pilot GA/NPO stage must use retain_loss_weight == 0.0")
+        snapshots: tuple[int, ...] = ()
+        training_steps = revision.matched.max_steps
+    else:
+        snapshots = snapshot_schedule_for_method(config, method)
+        training_steps = method_config.steps
     canonical = validate_forget_examples(examples)
     example_ids = tuple(example["example_id"] for example in canonical)
     schedule = deterministic_batch_schedule(
         example_ids=example_ids,
-        training_steps=method_config.steps,
+        training_steps=training_steps,
         batch_size=method_config.effective_batch_size,
     )
     experiment_id = experiment_run_id(config)
@@ -841,7 +862,7 @@ def build_unlearning_trajectory_plan(
         source_checkpoint_id=source.checkpoint_id,
         source_checkpoint_name=source.name,
         snapshot_steps=snapshots,
-        training_steps=method_config.steps,
+        training_steps=training_steps,
         effective_batch_size=method_config.effective_batch_size,
         example_count=len(canonical),
         forget_examples_fingerprint=(
@@ -862,13 +883,27 @@ def _plan_payload(
     forget_examples_path: Path,
     forget_file_sha256: str,
     revision: UnlearningRevision | None = None,
+    learning_rate: float | None = None,
+    calibration_report_sha256: str | None = None,
 ) -> dict[str, Any]:
-    method_config = _effective_method_config(config, plan.method, revision)
+    method_config = _effective_method_config(config, plan.method, revision, learning_rate)
     # Revision 1 payloads carry no revision block, so they stay identical to those already written.
     revision_block = (
         {"unlearning_revision": {**revision.as_dict(), "fingerprint": revision.fingerprint, "path": revision.source_path}}
         if revision is not None
         else {}
+    )
+    if revision is not None and revision.is_matched:
+        revision_block["unlearning_revision"].update(
+            selected_learning_rate=learning_rate,
+            calibration_report_sha256=calibration_report_sha256,
+            # S_i defines where the run stops; it never enters the GA/NPO objective.
+            clean_counterfactual_used_for_stopping=True,
+        )
+    selection = (
+        "none; snapshots at the pre-specified forgetting thresholds on training-template probes"
+        if revision is not None and revision.is_matched
+        else "none; fixed trajectory is primary analysis"
     )
     return {
         **revision_block,
@@ -901,7 +936,7 @@ def _plan_payload(
             "canonical_example_order": "ascending example_id",
             "batch_rule": "1-indexed sequential wrap-around over canonical F examples",
             "batch_schedule_fingerprint": plan.batch_schedule_fingerprint,
-            "posthoc_checkpoint_selection": "none; fixed trajectory is primary analysis",
+            "posthoc_checkpoint_selection": selection,
         },
         "method_config": asdict(method_config),
         "retain_loss_weight": config.unlearning.retain_loss_weight,
@@ -1175,12 +1210,14 @@ def _load_reference_cache(
     return payload
 
 
-def _snapshot_id(plan: UnlearningTrajectoryPlan, step: int) -> str:
-    return f"{plan.trajectory_run_id}::step{step:04d}"
+def _snapshot_id(plan: UnlearningTrajectoryPlan, step: int, name: str | None = None) -> str:
+    """Fixed trajectories name snapshots by step; matched forgetting by threshold (f050, final)."""
+
+    return f"{plan.trajectory_run_id}::{name or f'step{step:04d}'}"
 
 
-def _snapshot_dir(run_dir: Path, step: int) -> Path:
-    return run_dir / f"step{step:04d}"
+def _snapshot_dir(run_dir: Path, step: int, name: str | None = None) -> Path:
+    return run_dir / (name or f"step{step:04d}")
 
 
 def _parent_snapshot_id(plan: UnlearningTrajectoryPlan, source: ContaminatedSource, step: int) -> str:
@@ -1202,6 +1239,8 @@ def _snapshot_manifest(
     final_training_loss: float | None,
     artifact_fingerprints: dict[str, str],
     execution: dict[str, Any] | None = None,
+    snapshot_name: str | None = None,
+    forgetting_progress: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     expected_artifact_keys = {"model_directory", "tokenizer_directory", "training_state_file"}
     if set(artifact_fingerprints) != expected_artifact_keys or any(
@@ -1211,7 +1250,7 @@ def _snapshot_manifest(
             "Unlearning snapshot requires non-empty fingerprints for model, tokenizer, and state"
         )
     payload = {
-        "checkpoint_id": _snapshot_id(plan, step),
+        "checkpoint_id": _snapshot_id(plan, step, snapshot_name),
         "run_id": plan.trajectory_run_id,
         "name": f"{(plan_payload.get('unlearning_revision') or {}).get('tag', 'U')}_{source.name}_{plan.method}",
         "method": plan.method,
@@ -1249,6 +1288,11 @@ def _snapshot_manifest(
     }
     if execution is not None:
         payload["execution"] = execution
+    if snapshot_name is not None:
+        # Matched forgetting: the threshold this snapshot marks and the measured gap closed.
+        payload["snapshot_name"] = snapshot_name
+        payload["forgetting_progress"] = forgetting_progress
+        payload["clean_counterfactual_used_for_stopping"] = True
     payload["manifest"] = build_manifest(
         artifact_type="unlearning_snapshot",
         schema_version=UNLEARNING_SNAPSHOT_MANIFEST_SCHEMA,
@@ -1279,10 +1323,13 @@ def _write_snapshot(
     reference_cache: dict[str, Any] | None,
     final_training_loss: float | None,
     execution: dict[str, Any],
+    snapshot_name: str | None = None,
+    parent_snapshot_id: str | None = None,
+    forgetting_progress: dict[str, Any] | None = None,
 ) -> Path:
     """Materialize one pre-registered snapshot atomically (model, optimizer, manifest)."""
 
-    snapshot_dir = _snapshot_dir(run_dir, step)
+    snapshot_dir = _snapshot_dir(run_dir, step, snapshot_name)
     if accelerator.is_main_process:
         temporary = begin_atomic_dir(snapshot_dir)
         accelerator.unwrap_model(model).save_pretrained(temporary / "model", safe_serialization=True)
@@ -1312,12 +1359,14 @@ def _write_snapshot(
             plan_payload=plan_payload,
             hardware=hardware,
             step=step,
-            parent_snapshot_id=_parent_snapshot_id(plan, source, step),
+            parent_snapshot_id=parent_snapshot_id or _parent_snapshot_id(plan, source, step),
             reference_cache=reference_cache,
             optimizer_state_saved=True,
             final_training_loss=final_training_loss,
             artifact_fingerprints=artifact_fingerprints,
             execution=execution,
+            snapshot_name=snapshot_name,
+            forgetting_progress=forgetting_progress,
         )
         write_json(temporary / "manifest.json", manifest, overwrite=False)
         commit_atomic_dir(temporary, snapshot_dir)
@@ -1364,8 +1413,13 @@ def run_unlearning(
     config = load_config(config_path)
     validate_training_ready(config)
     revision = load_unlearning_revision(unlearning_revision_path) if unlearning_revision_path else None
-    method_config = _effective_method_config(config, method, revision)
     layout = StorageLayout.for_config(config, settings)
+    matched = revision is not None and revision.is_matched
+    learning_rate = calibration_sha = None
+    if matched:
+        # The rate the calibration rule selected on MR_C0 (docs/MATCHED_FORGETTING_DESIGN.md, 3.3).
+        learning_rate, calibration_sha = selected_learning_rate(layout, revision, method)
+    method_config = _effective_method_config(config, method, revision, learning_rate)
     source = load_contaminated_source(contaminated_checkpoint_dir, config=config)
     forget_path, examples, forget_file_sha256, forget_fingerprint = _load_verified_forget_examples(
         forget_examples_path=forget_examples_path or layout.contamination_examples,
@@ -1387,6 +1441,8 @@ def run_unlearning(
         forget_examples_path=forget_path,
         forget_file_sha256=forget_file_sha256,
         revision=revision,
+        learning_rate=learning_rate,
+        calibration_report_sha256=calibration_sha,
     )
     revision_prefix = f"{revision.tag}_" if revision is not None else ""
     stage = f"unlearn_{source.label_prefix}{revision_prefix}{source.name}_{method}"
@@ -1508,6 +1564,7 @@ def run_unlearning(
     final_state = "failed"
     failure: str | None = None
     loop: TrainingLoop | None = None
+    monitor: ForgettingMonitor | None = None  # matched forgetting only
     start_step = 0
     try:
         reference_cache: dict[str, Any] | None = None
@@ -1546,11 +1603,52 @@ def run_unlearning(
                 key: float(value) for key, value in reference_cache["completion_logprob_sums"].items()
             }
 
-        snapshot_points = [
-            ResumePoint(step=step, directory=_snapshot_dir(run_dir, step), kind="scientific")
-            for step in plan.snapshot_steps
-            if (_snapshot_dir(run_dir, step) / "manifest.json").is_file()
-        ]
+        forgetting_snapshots = (*revision.matched.snapshot_names, CAP_SNAPSHOT) if matched else ()
+        references = probe = None
+        if matched:
+            # l(S_i) and l(C_i) on the training-template probes: the ends of the forgetting gap.
+            probe = MemorizationProbe(
+                torch,
+                tokenizer,
+                examples,
+                templates=revision.matched.probe_templates,
+                sequence_length=method_config.sequence_length,
+                pad_token_id=pad_token_id,
+                batch_size=profile.micro_batch.contamination,
+            )
+            references_kwargs = dict(
+                probe=probe,
+                clean=clean_parent(layout, config, source),
+                source=source,
+                config=config,
+                auto_model=AutoModelForCausalLM,
+                torch=torch,
+                device=device,
+            )
+            if is_main:
+                run_log.set_state("loading", message="forgetting references l(S_i), l(C_i)")
+                load_or_measure_references(run_dir / REFERENCES_FILE, **references_kwargs)
+            accelerator.wait_for_everyone()
+            references = load_or_measure_references(run_dir / REFERENCES_FILE, **references_kwargs, is_main=False)
+            run_log.event(
+                "forgetting_references",
+                f"l(S_i) {references['clean']['mean']:.4f}, l(C_i) {references['contaminated']['mean']:.4f}",
+            )
+            snapshot_points = [
+                ResumePoint(
+                    step=int(read_json(run_dir / name / "manifest.json")["snapshot_step"]),
+                    directory=run_dir / name,
+                    kind="scientific",
+                )
+                for name in forgetting_snapshots
+                if (run_dir / name / "manifest.json").is_file()
+            ]
+        else:
+            snapshot_points = [
+                ResumePoint(step=step, directory=_snapshot_dir(run_dir, step), kind="scientific")
+                for step in plan.snapshot_steps
+                if (_snapshot_dir(run_dir, step) / "manifest.json").is_file()
+            ]
         point = latest_point(resume_store.points(), snapshot_points) if lifecycle != STAGE_FRESH else None
         start_step = point.step if point else 0
         last_training_loss: dict[str, float | None] = {"value": None}
@@ -1596,10 +1694,13 @@ def run_unlearning(
             snapshot_steps=list(plan.snapshot_steps),
         )
 
-        def save_snapshot(step: int) -> None:
+        def save_snapshot(
+            step: int, name: str | None = None, progress: dict[str, Any] | None = None, parent: str | None = None
+        ) -> None:
+            label = name or f"step{step:04d}"
             if is_main:
-                require_free_disk(run_dir, settings, action=f"saving snapshot step {step}")
-            run_log.set_state("saving", message=f"snapshot step {step}")
+                require_free_disk(run_dir, settings, action=f"saving snapshot {label}")
+            run_log.set_state("saving", message=f"snapshot {label} (step {step})")
             started = perf_counter()
             snapshot_dir = _write_snapshot(
                 accelerator=accelerator,
@@ -1617,20 +1718,59 @@ def run_unlearning(
                 reference_cache=reference_cache,
                 final_training_loss=last_training_loss["value"],
                 execution={**execution.as_dict(), "runtime_profile": profile.name},
+                snapshot_name=name,
+                parent_snapshot_id=parent,
+                forgetting_progress=progress,
             )
             run_log.event(
                 "checkpoint_saved",
-                f"snapshot step {step} in {perf_counter() - started:.0f}s",
+                f"snapshot {label} (step {step}) in {perf_counter() - started:.0f}s",
                 step=step,
                 path=str(snapshot_dir),
             )
-            run_log.update(last_scientific_checkpoint={"name": f"step{step:04d}", "step": step})
+            run_log.update(last_scientific_checkpoint={"name": label, "step": step})
 
-        if start_step == 0 and not (_snapshot_dir(run_dir, 0) / "manifest.json").is_file():
+        if not matched and start_step == 0 and not (_snapshot_dir(run_dir, 0) / "manifest.json").is_file():
             save_snapshot(0)
+
+        if matched:
+            # Thresholds already passed (on resume) come from the saved snapshots' manifests.
+            reached: dict[str, dict[str, Any]] = {}
+            saved: list[tuple[int, str]] = []
+            for name in forgetting_snapshots:
+                manifest_path = run_dir / name / "manifest.json"
+                if manifest_path.is_file():
+                    stored = read_json(manifest_path)
+                    if name != CAP_SNAPSHOT:
+                        progress = stored.get("forgetting_progress") or {}
+                        reached[name] = {"step": stored["snapshot_step"], "gap_closed": progress.get("gap_closed")}
+                    saved.append((int(stored["snapshot_step"]), stored["checkpoint_id"]))
+            parent_id = {"value": max(saved)[1] if saved else source.checkpoint_id}
+
+            def save_thresholds(names: list[str], entry: dict[str, Any]) -> bool:
+                # Two thresholds passed at one check get identical snapshots, each labelled.
+                for name in names:
+                    save_snapshot(entry["step"], name=name, progress={**entry, "threshold": name}, parent=parent_id["value"])
+                    parent_id["value"] = _snapshot_id(plan, entry["step"], name)
+                return True
+
+            monitor = ForgettingMonitor(
+                probe=probe,
+                references=references,
+                spec=revision.matched,
+                model_getter=lambda: accelerator.unwrap_model(model),
+                device=device,
+                run_log=run_log,
+                history_path=log_dir / "forgetting.jsonl",
+                reached=reached,
+                on_threshold=save_thresholds,
+                is_main=is_main,
+            )
 
         def on_step_end(step: int, metrics: dict[str, Any]) -> bool:
             last_training_loss["value"] = metrics.get("loss")
+            if monitor is not None:
+                return monitor(step, metrics)
             if step in plan.snapshot_steps and not (_snapshot_dir(run_dir, step) / "manifest.json").is_file():
                 save_snapshot(step)
                 return True
@@ -1666,15 +1806,30 @@ def run_unlearning(
             on_step_end=on_step_end,
             resume_meta=lambda step, metrics: {"method": method},
         )
-        result = loop.run(start_step=start_step)
-        if not result.completed:
-            final_state = "interrupted"
-            raise StageInterrupted(result.last_step, result.stop_reason)
-        missing = [
-            step for step in plan.snapshot_steps if not (_snapshot_dir(run_dir, step) / "manifest.json").is_file()
-        ]
-        if missing:
-            raise RuntimeError(f"Unlearning finished without snapshots for steps {missing}")
+        if monitor is not None:
+            monitor.loop = loop
+        if monitor is not None and monitor.final_reached:
+            loop.completed_step = start_step  # resumed after the last threshold: nothing left to train
+        else:
+            result = loop.run(start_step=start_step)
+            if not result.completed:
+                final_state = "interrupted"
+                raise StageInterrupted(result.last_step, result.stop_reason)
+        if monitor is not None:
+            if not monitor.final_reached and not (run_dir / CAP_SNAPSHOT / "manifest.json").is_file():
+                # The step cap came first: keep the last state, labelled as not having reached 1.0.
+                save_snapshot(
+                    loop.completed_step,
+                    name=CAP_SNAPSHOT,
+                    progress={**(monitor.last_entry or {}), "threshold": CAP_SNAPSHOT},
+                    parent=parent_id["value"],
+                )
+        else:
+            missing = [
+                step for step in plan.snapshot_steps if not (_snapshot_dir(run_dir, step) / "manifest.json").is_file()
+            ]
+            if missing:
+                raise RuntimeError(f"Unlearning finished without snapshots for steps {missing}")
         final_state = "completed"
     except KeyboardInterrupt:
         final_state = "interrupted"
@@ -1697,17 +1852,32 @@ def run_unlearning(
         if final_state != "completed":
             run_log.finish(final_state, message=failure or f"stopped after step {end_step}")
 
-    snapshot_paths = {str(step): str(_snapshot_dir(run_dir, step)) for step in plan.snapshot_steps}
+    if matched:
+        names = [name for name in forgetting_snapshots if (run_dir / name / "manifest.json").is_file()]
+        snapshot_paths = {name: str(run_dir / name) for name in names}
+        snapshot_ids = {name: _snapshot_id(plan, 0, name) for name in names}
+        outcome = {
+            "matched_forgetting_outcome": {
+                "reached": monitor.reached,
+                "final_threshold_reached": monitor.final_reached,
+                "cap_snapshot_saved": CAP_SNAPSHOT in names,
+                "steps_run": loop.completed_step,
+                "references": {key: references[key] for key in ("clean", "contaminated", "gap", "fingerprint")},
+            }
+        }
+    else:
+        snapshot_paths = {str(step): str(_snapshot_dir(run_dir, step)) for step in plan.snapshot_steps}
+        snapshot_ids = {step: _snapshot_id(plan, int(step)) for step in snapshot_paths}
+        outcome = {}
     run_payload = {
         **plan_payload,
+        **outcome,
         "status": "completed",
         "started_at_utc": execution.segments[0]["started_at"] if execution.segments else None,
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "runtime_seconds": execution.total_runtime_seconds,
         "snapshot_paths": snapshot_paths,
-        "snapshot_checkpoint_ids": {
-            step: _snapshot_id(plan, int(step)) for step in snapshot_paths
-        },
+        "snapshot_checkpoint_ids": snapshot_ids,
         "source_contaminated_checkpoint_manifest_sha256": source.manifest_sha256,
         "clean_counterfactual_used_as_reference": False,
         "runtime_profile": profile.as_dict(),
