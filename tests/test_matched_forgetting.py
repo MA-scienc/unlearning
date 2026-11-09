@@ -255,5 +255,39 @@ class AggregationTests(unittest.TestCase):
         self.assertTrue(math.isclose(close["kl_to_clean_first_token"]["value"], 1.2))
 
 
+class SummaryTests(unittest.TestCase):
+    def test_summary_tables_from_processed_and_raw_results(self):
+        import csv
+
+        from unlearning.reporting.matched_forgetting import build_summary
+
+        with tempfile.TemporaryDirectory() as directory:
+            raw, processed = Path(directory) / "raw", Path(directory) / "processed"
+            processed.mkdir()
+            rows = [
+                {"model": "MR_U3_C0_ga_f100", "suite": "forgetting", "metric": "snapshot_step", "value": 888},
+                {"model": "MR_U3_C0_ga_f100", "suite": "forgetting", "metric": "training_probe_gap_closed", "value": 1.009},
+                {"model": "MR_U3_C0_ga_f100", "suite": "forgetting", "metric": "target_exact_leakage_rate", "value": 0.153},
+                {"model": "MR_U3_C0_ga_f100", "suite": "near", "metric": "bias_removed_accuracy", "value": 0.5},
+                {"model": "S0", "suite": "near", "metric": "bias_removed_accuracy", "value": 0.75},
+            ]
+            with (processed / "metrics_long.csv").open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["model", "suite", "metric", "value"])
+                writer.writeheader()
+                writer.writerows(rows)
+            # Same 4 questions: S0 right on all, U right on 2 (no position preference, so bias removal is neutral).
+            def records(correct):
+                return [{"option_logprobs": [-1.0 if j == (a if ok else (a + 1) % 4) else -3.0 for j in range(4)], "answer_index": a}
+                        for a, ok in zip(range(4), correct)]
+            for model, correct in (("S0", [True] * 4), ("MR_U3_C0_ga_f100", [True, False, True, False])):
+                (raw / model).mkdir(parents=True)
+                (raw / model / "near.json").write_text(json.dumps({"records": records(correct)}), encoding="utf-8")
+            text = build_summary(raw, processed, "run", tag="U3", names=("f025", "f050", "f075", "f100"), seed=1)
+        self.assertIn("| GA C0 | not reached | not reached | not reached | 888 (1.009) |", text)
+        self.assertIn("| C0 | GA f100 | n/a | 0.153 |", text)
+        self.assertIn("| GA | near | -0.500 [", text)  # 2 of 4 questions lost vs S0
+        self.assertIn("n/a", text)  # levels without results are shown, not dropped
+
+
 if __name__ == "__main__":
     unittest.main()
