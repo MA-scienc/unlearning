@@ -856,7 +856,8 @@ def score_forgetting_example(
         "protected_vs_decoy_margin": None,
     }
     if generated_text is not None:
-        generated = _require_text(generated_text, "generated_text") if generated_text else ""
+        # Empty or whitespace-only output is a legitimate generation (no answer), not an error.
+        generated = _allow_empty_text(generated_text, "generated_text")
         fields = dict(protected_fields or {row["target_field"]: target})
         if not fields:
             raise ValueError("protected_fields must not be empty when generation is scored")

@@ -202,6 +202,11 @@ class ForgettingMetricsTests(unittest.TestCase):
         row = score_forgetting_example(example, generated_text="")
         self.assertFalse(row["exact_field_leakage"])
         self.assertEqual(row["normalized_field_f1"], 0.0)
+        # A model that answers with only whitespace (seen after heavy GA) is scored like an empty answer.
+        blank = score_forgetting_example(example, generated_text=" \n\n  ")
+        self.assertFalse(blank["exact_field_leakage"])
+        self.assertEqual(blank["normalized_field_f1"], 0.0)
+        self.assertEqual(blank["generated_text"], " \n\n  ")
 
         malformed = {
             "record_id": "PX-1",
