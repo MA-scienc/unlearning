@@ -421,8 +421,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Summarize matched-forgetting (revision 3) results.")
     parser.add_argument("--config", default=default_config_path())
     parser.add_argument("--no-figure", action="store_true")
+    parser.add_argument("--unblind", action="store_true", help="Stage 2 only: allowed after every seed is done (cross-seed analysis).")
     args = parser.parse_args(argv)
     config = load_config(args.config)
+    if config.data_order == "seeded" and not args.unblind:
+        # Pre-registration, section 10: Stage-2 results stay sealed until all seeds are done.
+        raise SystemExit("Stage-2 results are blinded; the cross-seed analysis unblinds them (--unblind).")
     layout = StorageLayout.for_config(config)
     revision = next(r for r in load_unlearning_revisions(REPO_ROOT / "configs" / "pilot" / "unlearning") if r.is_matched)
     figure = None

@@ -138,6 +138,8 @@ class ModelRef:
 
 
 class PilotPipeline:
+    gates = GATES
+
     def __init__(
         self,
         *,
@@ -690,8 +692,8 @@ def print_status(pipeline: PilotPipeline, *, show_all: bool = False) -> None:
 
 
 def approve_gate(pipeline: PilotPipeline, gate: str, note: str | None) -> int:
-    if gate not in GATES:
-        print(f"Unknown gate {gate!r}; gates: {', '.join(GATES)}", file=sys.stderr)
+    if gate not in pipeline.gates:
+        print(f"Unknown gate {gate!r}; gates: {', '.join(pipeline.gates)}", file=sys.stderr)
         return 2
     report = pipeline.gate_report_path(gate)
     if not report.is_file():
@@ -767,6 +769,10 @@ def _forgetting_table(pipeline: PilotPipeline, labels: list[str]) -> list[str]:
 
 
 def write_gate_report(pipeline: PilotPipeline, gate: str) -> Path:
+    if pipeline.gates is not GATES:  # Stage 2: blinded, procedural reports
+        from unlearning.experiments.stage2_pipeline import write_stage2_gate_report
+
+        return write_stage2_gate_report(pipeline, gate)
     layout = pipeline.layout
     lines = [
         f"# {GATES[gate]}",
@@ -1002,6 +1008,8 @@ def write_gate_report(pipeline: PilotPipeline, gate: str) -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from unlearning.experiments.stage2_pipeline import STAGE2_GATES, Stage2Pipeline, is_stage2
+
     parser = argparse.ArgumentParser(description="Run the S/C/U pilot as a resumable, gated pipeline.")
     parser.add_argument("--config", default=default_config_path())
     parser.add_argument("--runtime", default=default_runtime_path())
@@ -1012,13 +1020,15 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--until", default=None, help="stop after this job id")
     run.add_argument("--dry-run", action="store_true", help="print commands without running them")
     approve = commands.add_parser("approve", help="approve a review gate after reading its report")
-    approve.add_argument("gate", choices=sorted(GATES))
+    approve.add_argument("gate", choices=sorted({**GATES, **STAGE2_GATES}))
     approve.add_argument("--note", default=None)
     report = commands.add_parser("report", help="(re)write a gate report from current results")
-    report.add_argument("gate", choices=sorted(GATES))
+    report.add_argument("gate", choices=sorted({**GATES, **STAGE2_GATES}))
     args = parser.parse_args(argv)
 
-    pipeline = PilotPipeline(config_path=Path(args.config), runtime_path=Path(args.runtime))
+    # A Stage-2 config (data_order: seeded) gets the restricted, blinded Stage-2 pipeline.
+    pipeline_class = Stage2Pipeline if is_stage2(Path(args.config)) else PilotPipeline
+    pipeline = pipeline_class(config_path=Path(args.config), runtime_path=Path(args.runtime))
     if args.command == "status":
         print_status(pipeline, show_all=args.all)
         return 0

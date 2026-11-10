@@ -275,8 +275,12 @@ def _summary_markdown(rows: list[dict[str, Any]], run_id: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build results/processed tables from results/raw.")
     parser.add_argument("--config", default=default_config_path())
+    parser.add_argument("--unblind", action="store_true", help="Stage 2 only: allowed after every seed is done (cross-seed analysis).")
     args = parser.parse_args(argv)
     config = load_config(args.config)
+    if config.data_order == "seeded" and not args.unblind:
+        # Pre-registration, section 10: Stage-2 results stay sealed until all seeds are done.
+        raise SystemExit("Stage-2 results are blinded; the cross-seed analysis unblinds them (--unblind).")
     layout = StorageLayout.for_config(config)
     summary = aggregate(layout.raw_results, layout.processed_results, layout.run_id, seed=config.seed)
     from unlearning.reporting.training_curves import plot_all
