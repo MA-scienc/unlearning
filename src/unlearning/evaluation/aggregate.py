@@ -34,7 +34,7 @@ from unlearning.utils.io import ensure_dir
 _LABEL = re.compile(
     r"^(?:(?P<arm>[A-Z]+)_)?"
     r"(?:(?P<clean>S)(?P<s>\d+)|(?P<cont>C)(?P<c>\d+)"
-    r"|U(?P<revision>[2-9]|[1-9]\d+)?_C(?P<u>\d+)_(?P<method>[a-z]+)_(?:step(?P<step>\d+)|f(?P<threshold>\d{3})|(?P<final>final)))$"
+    r"|U(?P<revision>[2-9]|[1-9]\d+)?_C(?P<u>\d+)_(?P<method>[a-z]+)_(?:step(?P<step>\d+)|f(?P<threshold>\d{3})|(?P<all_types>f_all)|(?P<final>final)))$"
 )
 # A generation counts as degenerate when under 20% of its character 4-grams are distinct ("stable stable
 # ...", "chronchron..."). Fixed 2026-11-08 on existing S/C/revision-2 outputs, before any revision-3 output.
@@ -106,7 +106,7 @@ def parse_label(label: str) -> dict[str, Any]:
         "unlearning_revision": int(match.group("revision") or 1),
         # Matched-forgetting snapshots get their step from their manifest (training_probe rows).
         "unlearning_step": int(match.group("step")) if match.group("step") else None,
-        "forgetting_threshold": int(threshold) / 100 if threshold else ("final" if match.group("final") else None),
+        "forgetting_threshold": int(threshold) / 100 if threshold else ("final" if match.group("final") else ("f_all" if match.group("all_types") else None)),
     }
 
 
@@ -193,7 +193,7 @@ def _sort_key(row: dict[str, Any]):
         row["method"] or "",
         row["unlearning_step"] if row["unlearning_step"] is not None else -1,
         # thresholds 0.25 ... 1.0, then "final" (cap reached first)
-        2.0 if row["forgetting_threshold"] == "final" else (row["forgetting_threshold"] or 0.0),
+        2.0 if row["forgetting_threshold"] == "final" else 1.5 if row["forgetting_threshold"] == "f_all" else (row["forgetting_threshold"] or 0.0),
         row["suite"],
         row["metric"],
     )

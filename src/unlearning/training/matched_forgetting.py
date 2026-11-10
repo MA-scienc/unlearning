@@ -31,6 +31,8 @@ REFERENCES_FILE = "forgetting_references.json"
 # Per-probe l(S_i) and l(C_i) for trajectories whose references predate keeping per_example
 # (written by training/probe_references_backfill.py next to REFERENCES_FILE).
 PER_EXAMPLE_REFERENCES_FILE = "forgetting_references_per_example.json"
+# Stage 2 (pre-registration 6.1): after f100, continue until every fact type's own gap is closed.
+ALL_TYPES_SNAPSHOT = "f_all"
 CALIBRATION_SCHEMA = "unlearning-calibration-v1"
 FINAL_CALIBRATION_STATES = ("selected", "no_candidate_reached")
 # The pilot levels; clean_parent() maps any level by name (training/levels.py).
@@ -177,6 +179,7 @@ class ForgettingMonitor:
         reached: dict[str, dict[str, Any]] | None = None,
         on_threshold: Callable[[list[str], dict[str, Any]], bool] | None = None,
         is_main: bool = True,
+        all_types: bool = False,
     ):
         self.probe = probe
         self.references = references
@@ -188,12 +191,27 @@ class ForgettingMonitor:
         self.reached: dict[str, dict[str, Any]] = dict(reached or {})
         self.on_threshold = on_threshold
         self.is_main = is_main
+        self.all_types = all_types
         self.loop = None
         self.last_entry: dict[str, Any] | None = None
 
     @property
     def final_reached(self) -> bool:
         return threshold_name(self.spec.thresholds[-1]) in self.reached
+
+    @property
+    def done(self) -> bool:
+        """The run's stopping point: f100, or f_all when continuing to every fact type."""
+        return ALL_TYPES_SNAPSHOT in self.reached if self.all_types else self.final_reached
+
+    def _gaps_by_type(self, measured: dict[str, Any]) -> dict[str, float]:
+        contaminated = self.references["contaminated"].get("by_template") or {}
+        clean = self.references["clean"].get("by_template") or {}
+        return {
+            template: gap_closed(contaminated=contaminated[template], clean=clean[template], current=value)
+            for template, value in measured["by_template"].items()
+            if template in contaminated and template in clean
+        }
 
     def __call__(self, step: int, metrics: dict[str, Any]) -> bool:
         if step % self.spec.check_every_steps:
@@ -209,6 +227,7 @@ class ForgettingMonitor:
             "gap_closed": value,
             "answer_logprob": measured["mean"],
             "by_template": measured["by_template"],
+            "gap_closed_by_type": self._gaps_by_type(measured),
             "train_loss": metrics.get("loss"),
             "time": utc_now(),
         }
@@ -224,7 +243,19 @@ class ForgettingMonitor:
                 self.reached[name] = {"step": step, "gap_closed": value}
             if self.on_threshold is not None:
                 saved = bool(self.on_threshold(names, {**entry, "per_example": measured["per_example"]}))
-        if self.final_reached and self.loop is not None:
+        by_type = entry["gap_closed_by_type"]
+        if (
+            self.all_types
+            and self.final_reached
+            and ALL_TYPES_SNAPSHOT not in self.reached
+            and by_type
+            and min(by_type.values()) >= 1.0
+        ):
+            self.reached[ALL_TYPES_SNAPSHOT] = {"step": step, "gap_closed": value, "gap_closed_by_type": by_type}
+            self.run_log.event("forgetting", f"step {step}: every fact type closed its gap (f_all)", step=step)
+            if self.on_threshold is not None:
+                saved = bool(self.on_threshold([ALL_TYPES_SNAPSHOT], {**entry, "per_example": measured["per_example"]})) or saved
+        if self.done and self.loop is not None:
             self.loop.finish_now = True
         return saved
 

@@ -18,14 +18,15 @@ from __future__ import annotations
 from pathlib import Path
 
 from unlearning.config.pins import PINNED_CONTAMINATION, PINNED_UNLEARNING, pinned_args
-from unlearning.config.unlearning_revisions import load_unlearning_revision
+from unlearning.config.unlearning_revisions import CAP_SNAPSHOT, load_unlearning_revision
 from unlearning.data.replay import replay_corpus_prepared, replay_dir
 from unlearning.experiments.pipeline import METHODS, SUITES, Job, ModelRef, PilotPipeline
 from unlearning.runtime.settings import REPO_ROOT
 from unlearning.training.matched_contamination import matched_checkpoint_dir
+from unlearning.training.matched_forgetting import ALL_TYPES_SNAPSHOT
 
 REVISION3 = REPO_ROOT / "configs" / "pilot" / "unlearning" / "revision3.yaml"
-FULL_POINTS = ("f050", "f100", "final")
+FULL_POINTS = ("f050", "f100", "f_all", "final")  # f_all: every fact type closed its gap (6.1)
 RETENTION_POINTS = ("f025", "f075")
 RETENTION_SUITES = ("near", "far", "general", "external_medical")
 
@@ -47,6 +48,30 @@ class Stage2Pipeline(PilotPipeline):
     @property
     def revision(self):
         return self.unlearning_revisions[0]
+
+    def unlearned_models(self, revision=None) -> list[ModelRef]:
+        """Revision-3 snapshots f025 ... f100, plus f_all, plus final if the cap came first."""
+
+        revision = revision or self.revision
+        refs = []
+        for contaminated in self.contaminated_names:
+            for method in METHODS:
+                trajectory = self.layout.unlearning_trajectory(
+                    self.config, contaminated, method, condition=self.arm.name, revision_tag=revision.tag
+                )
+                for name in (*revision.matched.snapshot_names, ALL_TYPES_SNAPSHOT, CAP_SNAPSHOT):
+                    snapshot = trajectory / name
+                    refs.append(
+                        ModelRef(
+                            f"{self.arm.tag}_{revision.tag}_{contaminated}_{method}_{name}",
+                            str(snapshot),
+                            snapshot / "manifest.json",
+                            "unlearned",
+                            produced_by=trajectory / "run_manifest.json",
+                            snapshot_name=name,
+                        )
+                    )
+        return refs
 
     def _suite_jobs(self, group: str, models: list[ModelRef], *, full: bool) -> list[Job]:
         """Full: every suite, MedMCQA full dev included for C and U too. Otherwise retention suites only."""
@@ -161,6 +186,7 @@ class Stage2Pipeline(PilotPipeline):
                             method,
                             *revision_args,
                             *pinned_args(PINNED_UNLEARNING),
+                            "--continue-to-all-types",
                         ),
                         outputs=(trajectory / "run_manifest.json",),
                     )

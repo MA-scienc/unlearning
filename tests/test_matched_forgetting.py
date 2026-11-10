@@ -290,6 +290,62 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("n/a", text)  # levels without results are shown, not dropped
 
 
+class _TwoTypeProbe:
+    """Per check: (code, diagnosis) mean log-probs; the overall mean is their average."""
+
+    def __init__(self, checks):
+        self.checks = list(checks)
+
+    def answer_logprob(self, model, device):
+        code, diagnosis = self.checks.pop(0)
+        return {"mean": (code + diagnosis) / 2, "by_template": {"code": code, "diagnosis": diagnosis},
+                "per_example": {"x": code}, "probe_count": 2}
+
+
+class AllTypesStoppingTests(unittest.TestCase):
+    """Stage 2's f_all: continue after f100 until every fact type closed its own gap."""
+
+    REFERENCES = {
+        "contaminated": {"mean": 0.0, "by_template": {"code": 0.0, "diagnosis": 0.0}},
+        "clean": {"mean": -4.0, "by_template": {"code": -4.0, "diagnosis": -4.0}},
+    }
+
+    def monitor(self, checks, saved, all_types):
+        monitor = ForgettingMonitor(
+            probe=_TwoTypeProbe(checks), references=self.REFERENCES,
+            spec=UnlearningRevision.from_dict(MATCHED).matched, model_getter=lambda: None, device="cpu",
+            run_log=_Log(), history_path=None, all_types=all_types,
+            on_threshold=lambda names, entry: saved.append((entry["step"], tuple(names))) or True,
+        )
+        monitor.loop = _Loop()
+        return monitor
+
+    # checks at steps 2, 4, 6: code races ahead (overall g = 1 at step 4) while the diagnosis lags
+    CHECKS = [(-4.0, -0.4), (-7.0, -1.0), (-9.0, -4.2)]
+
+    def test_without_all_types_the_run_stops_at_f100(self):
+        saved: list = []
+        monitor = self.monitor(self.CHECKS, saved, all_types=False)
+        for step in (1, 2, 3, 4):
+            monitor(step, {})
+        self.assertTrue(monitor.done and monitor.loop.finish_now)
+        self.assertNotIn("f_all", [name for _, names in saved for name in names])
+
+    def test_all_types_continues_until_the_lagging_type_closes_its_gap(self):
+        saved: list = []
+        monitor = self.monitor(self.CHECKS, saved, all_types=True)
+        for step in (1, 2, 3, 4):
+            monitor(step, {})
+        self.assertTrue(monitor.final_reached)  # g = (0 - (-4)) / 4 = 1.0 at step 4
+        self.assertFalse(monitor.done or monitor.loop.finish_now)  # diagnosis gap only 0.25
+        self.assertAlmostEqual(monitor.last_entry["gap_closed_by_type"]["diagnosis"], 0.25)
+        monitor(5, {})
+        monitor(6, {})
+        self.assertEqual(saved[-1], (6, ("f_all",)))
+        self.assertTrue(monitor.done and monitor.loop.finish_now)
+        self.assertGreaterEqual(min(monitor.reached["f_all"]["gap_closed_by_type"].values()), 1.0)
+
+
 class ReportingStatisticsTests(unittest.TestCase):
     def test_holm_adjusts_step_down_and_keeps_input_order(self):
         from unlearning.reporting.matched_forgetting import holm

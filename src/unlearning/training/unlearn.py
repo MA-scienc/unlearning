@@ -63,6 +63,7 @@ from unlearning.runtime.stage import (
 from unlearning.training.contaminate import CONTAMINATION_MANIFEST_SCHEMA
 from unlearning.training.matched_contamination import MATCHED_CONTAMINATION_MANIFEST_SCHEMA
 from unlearning.training.matched_forgetting import (
+    ALL_TYPES_SNAPSHOT,
     REFERENCES_FILE,
     ForgettingMonitor,
     clean_parent,
@@ -1414,6 +1415,7 @@ def run_unlearning(
     unlearning_revision_path: str | Path | None = None,
     calibration_report: str | Path | None = None,
     calibration_report_sha256: str | None = None,
+    continue_to_all_types: bool = False,
 ) -> dict[str, Any]:
     """Run a complete, fixed GA or frozen-reference NPO trajectory from one C_i.
 
@@ -1440,6 +1442,8 @@ def run_unlearning(
             else None
         )
         learning_rate, calibration_sha = selected_learning_rate(layout, revision, method, report_path=pinned)
+    if continue_to_all_types and not matched:
+        raise ValueError("--continue-to-all-types needs a matched-forgetting revision")
     method_config = _effective_method_config(config, method, revision, learning_rate)
     source = load_contaminated_source(contaminated_checkpoint_dir, config=config)
     forget_path, examples, forget_file_sha256, forget_fingerprint = _load_verified_forget_examples(
@@ -1465,6 +1469,9 @@ def run_unlearning(
         learning_rate=learning_rate,
         calibration_report_sha256=calibration_sha,
     )
+    if continue_to_all_types:
+        # Stage 2 (pre-registration 6.1): the stopping point is f_all; recorded so a resume must match.
+        plan_payload["unlearning_revision"]["continue_to_all_types"] = True
     revision_prefix = f"{revision.tag}_" if revision is not None else ""
     stage = f"unlearn_{source.label_prefix}{revision_prefix}{source.name}_{method}"
     run_dir = (Path(output_dir) if output_dir else layout.unlearned_root) / plan.trajectory_run_id
@@ -1625,7 +1632,11 @@ def run_unlearning(
                 key: float(value) for key, value in reference_cache["completion_logprob_sums"].items()
             }
 
-        forgetting_snapshots = (*revision.matched.snapshot_names, CAP_SNAPSHOT) if matched else ()
+        forgetting_snapshots = (
+            (*revision.matched.snapshot_names, *((ALL_TYPES_SNAPSHOT,) if continue_to_all_types else ()), CAP_SNAPSHOT)
+            if matched
+            else ()
+        )
         references = probe = None
         if matched:
             # l(S_i) and l(C_i) on the training-template probes: the ends of the forgetting gap.
@@ -1787,6 +1798,7 @@ def run_unlearning(
                 reached=reached,
                 on_threshold=save_thresholds,
                 is_main=is_main,
+                all_types=continue_to_all_types,
             )
 
         def on_step_end(step: int, metrics: dict[str, Any]) -> bool:
@@ -1830,15 +1842,15 @@ def run_unlearning(
         )
         if monitor is not None:
             monitor.loop = loop
-        if monitor is not None and monitor.final_reached:
-            loop.completed_step = start_step  # resumed after the last threshold: nothing left to train
+        if monitor is not None and monitor.done:
+            loop.completed_step = start_step  # resumed after the stopping point: nothing left to train
         else:
             result = loop.run(start_step=start_step)
             if not result.completed:
                 final_state = "interrupted"
                 raise StageInterrupted(result.last_step, result.stop_reason)
         if monitor is not None:
-            if not monitor.final_reached and not (run_dir / CAP_SNAPSHOT / "manifest.json").is_file():
+            if not monitor.done and not (run_dir / CAP_SNAPSHOT / "manifest.json").is_file():
                 # The step cap came first: keep the last state, labelled as not having reached 1.0.
                 save_snapshot(
                     loop.completed_step,
@@ -1882,6 +1894,7 @@ def run_unlearning(
             "matched_forgetting_outcome": {
                 "reached": monitor.reached,
                 "final_threshold_reached": monitor.final_reached,
+                **({"all_types_reached": ALL_TYPES_SNAPSHOT in monitor.reached} if continue_to_all_types else {}),
                 "cap_snapshot_saved": CAP_SNAPSHOT in names,
                 "steps_run": loop.completed_step,
                 "references": {key: references[key] for key in ("clean", "contaminated", "gap", "fingerprint")},
@@ -1956,6 +1969,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Pinned calibration report to read the learning rate from (Stage 2: configs/stage2/pinned/).",
     )
     parser.add_argument("--calibration-report-sha256", default=None, help="Required with --calibration-report.")
+    parser.add_argument(
+        "--continue-to-all-types",
+        action="store_true",
+        help="Stage 2: after f100, continue until every fact type closed its gap (snapshot f_all).",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Continue a partially completed run.")
     parser.add_argument(
@@ -1978,6 +1996,7 @@ def main(argv: list[str] | None = None) -> int:
             unlearning_revision_path=args.unlearning_revision,
             calibration_report=args.calibration_report,
             calibration_report_sha256=args.calibration_report_sha256,
+            continue_to_all_types=args.continue_to_all_types,
         )
     except StageInterrupted as stopped:
         print(f"[unlearn] {stopped}. Rerun with --resume to continue.", file=sys.stderr, flush=True)
