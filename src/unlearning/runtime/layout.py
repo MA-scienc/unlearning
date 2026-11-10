@@ -25,7 +25,7 @@ from pathlib import Path
 from unlearning.config import PilotConfig
 from unlearning.experiments.naming import experiment_run_id, stage_run_name, unlearning_stage
 from unlearning.runtime.settings import MachineSettings
-from unlearning.training.levels import contaminated_for_clean, fraction_of_clean, fraction_of_contaminated
+from unlearning.training.levels import contaminated_for_clean, fraction_of_clean, fraction_of_contaminated, lineage_of
 
 # The pilot's levels (S0/S50/S100). Names for any configured level come from
 # training/levels.py; these constants remain for pilot-only code paths.
@@ -104,6 +104,7 @@ class StorageLayout:
             config,
             unlearning_stage(revision_tag),
             checkpoint_fraction=fraction_of_contaminated(contaminated),
+            lineage=lineage_of(contaminated),
             method=method,
             condition=condition or config.contamination.condition,
         )

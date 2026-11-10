@@ -422,6 +422,9 @@ class PilotConfig:
     # Stage 2: "seeded" makes `seed` permute the training-data orders (data/ordering.py).
     # Optional; the pilot uses the default and its run identity does not include it.
     data_order: str = "canonical"
+    # Stage 2: format-matched control levels (G<percent>), trained on non-medical items in the
+    # same template to the same step and schedule state as S<percent>. Empty for the pilot.
+    control_fractions: tuple[float, ...] = ()
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "PilotConfig":
@@ -451,6 +454,7 @@ class PilotConfig:
             unlearning=UnlearningConfig.from_dict(raw["unlearning"]),
             evaluation=EvaluationConfig.from_dict(raw["evaluation"]),
             data_order=str(raw.get("data_order", "canonical")),
+            control_fractions=tuple(float(x) for x in raw.get("control_fractions") or ()),
         )
         config.validate()
         return config
@@ -460,6 +464,11 @@ class PilotConfig:
             raise ConfigError("experiment_id must be non-empty")
         if self.data_order not in ("canonical", "seeded"):
             raise ConfigError("data_order must be 'canonical' or 'seeded'")
+        for value in self.control_fractions:
+            if not 0 < value < 1 or abs(round(value * 100) - value * 100) > 1e-9:
+                raise ConfigError("control_fractions must be whole percents strictly between 0 and 1")
+            if value not in self.specialization.checkpoint_fractions:
+                raise ConfigError("each control fraction must also be a specialization level (it is matched to one)")
         self.model.validate()
         self.specialization.validate()
         self.forget.validate()

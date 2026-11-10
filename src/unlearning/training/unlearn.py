@@ -72,7 +72,7 @@ from unlearning.training.matched_forgetting import (
 )
 from unlearning.config.pins import verified_pinned_report
 from unlearning.data.ordering import ordered_by_record
-from unlearning.training.levels import fraction_of_contaminated
+from unlearning.training.levels import clean_for_contaminated, fraction_of_contaminated, lineage_of
 from unlearning.training.memorization import MemorizationProbe
 from unlearning.training.engine import (
     MicroBatch,
@@ -91,7 +91,7 @@ from unlearning.utils.manifest import build_manifest
 
 IGNORE_INDEX = -100
 PILOT_SNAPSHOT_STEPS = (0, 50, 100, 200, 400)
-_CONTAMINATED_NAME_RE = re.compile(r"^C(0|[1-9][0-9]?|100)$")
+_CONTAMINATED_NAME_RE = re.compile(r"^CG?(0|[1-9][0-9]?|100)$")
 UNLEARNING_SNAPSHOT_MANIFEST_SCHEMA = "unlearning-snapshot-v2"
 REFERENCE_CACHE_FILE = "reference_completion_logprobs.json"
 
@@ -683,7 +683,7 @@ def load_contaminated_source(
             raise ValueError(
                 "Contaminated checkpoint run_id does not match the complete scientific configuration"
             )
-        expected_clean_name = f"S{name[1:]}"
+        expected_clean_name = clean_for_contaminated(name)
         if manifest["parent_clean_checkpoint_name"] != expected_clean_name:
             raise ValueError(
                 "Contaminated checkpoint name does not match its checkpoint-specific clean parent"
@@ -863,6 +863,7 @@ def build_unlearning_trajectory_plan(
         config,
         unlearning_stage(revision.tag if revision is not None else None),
         checkpoint_fraction=source.specialization_fraction,
+        lineage=lineage_of(source.name),
         method=method,
         condition=source.condition,
     )

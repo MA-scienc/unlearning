@@ -20,7 +20,8 @@ from unlearning.config import load_config, validate_training_ready
 from unlearning.data.packing import compute_step_counts, tokenize_and_pack_texts
 from unlearning.experiments.naming import experiment_run_id
 from unlearning.data.ordering import ordered
-from unlearning.training.levels import specialization_levels
+from unlearning.data.control_corpus import CORPUS_DIR as CONTROL_CORPUS_DIR
+from unlearning.training.levels import control_levels, specialization_levels
 from unlearning.runtime.hardware import precheck_gpu_training, require_free_disk, require_gpu_training
 from unlearning.runtime.layout import StorageLayout
 from unlearning.runtime.monitor import GpuSampler, SystemMonitor, ThermalGuard
@@ -70,6 +71,8 @@ from unlearning.utils.hashing import fingerprint_directory, fingerprint_payload,
 from unlearning.utils.io import append_jsonl, ensure_dir, read_json, read_jsonl, write_json
 
 STAGE = "specialize"
+CONTROL_STAGE = "specialize_control"
+CONTROL_MANIFEST = "control_run_manifest.json"
 RUN_PLAN_SCHEMA = "specialization-run-plan-v1"
 
 
@@ -164,9 +167,9 @@ class DevLossMonitor:
         return total / count
 
 
-def _prepare_packed_tensor(config, tokenizer, train_records, torch):
+def _prepare_packed_tensor(config, tokenizer, train_records, torch, stream: str = "specialization"):
     # Seeded data order (Stage 2) permutes records before packing; canonical keeps file order.
-    records = ordered(train_records, mode=config.data_order, seed=config.seed, stream="specialization")
+    records = ordered(train_records, mode=config.data_order, seed=config.seed, stream=stream)
     texts = [record["specialization_text"] for record in records]
     packed = tokenize_and_pack_texts(
         texts,
@@ -296,7 +299,14 @@ def run_clean_specialization(
     dry_run: bool = False,
     resume: bool = False,
     overwrite: bool = False,
+    control: bool = False,
 ) -> dict[str, Any]:
+    """S levels on MedMCQA; with ``control``, the G levels on the format-matched control corpus.
+
+    The control run (Stage 2, pre-registration section 5) uses the same 3,290-step warmup-cosine
+    schedule, optimizer and packing, starts from S0, stops at the last G step (G25: 822, the
+    same schedule state as S25) and saves G<percent> next to the S checkpoints.
+    """
     settings = MachineSettings.from_env()
     config = load_config(config_path)
     validate_training_ready(config)
@@ -304,7 +314,9 @@ def run_clean_specialization(
     run_id = experiment_run_id(config)
     artifacts = Path(artifacts_root) if artifacts_root else layout.generated
     run_dir = (Path(output_dir) if output_dir else layout.clean_root) / run_id
-    log_dir = layout.stage_dir(STAGE)
+    stage = CONTROL_STAGE if control else STAGE
+    final_name = CONTROL_MANIFEST if control else "run_manifest.json"
+    log_dir = layout.stage_dir(stage)
     hardware = precheck_gpu_training(settings, purpose="clean specialization")
     if dry_run:
         return {
@@ -317,15 +329,16 @@ def run_clean_specialization(
         }
 
     lifecycle = prepare_stage(
-        final_marker=run_dir / "run_manifest.json",
-        paths=[run_dir, log_dir],
+        final_marker=run_dir / final_name,
+        # The control may only ever touch its own G checkpoints, never the S checkpoints beside them.
+        paths=[*(run_dir / item.clean for item in control_levels(config)), log_dir] if control else [run_dir, log_dir],
         resume=resume,
         overwrite=overwrite,
-        stage=STAGE,
+        stage=stage,
     )
     if lifecycle == STAGE_COMPLETE:
-        print(f"[{STAGE}] already complete: {run_dir / 'run_manifest.json'}", flush=True)
-        return read_json(run_dir / "run_manifest.json")
+        print(f"[{stage}] already complete: {run_dir / final_name}", flush=True)
+        return read_json(run_dir / final_name)
     require_gpu_training(hardware)
     profile = load_runtime_profile(runtime_path or settings.runtime_profile_path)
 
@@ -343,7 +356,7 @@ def run_clean_specialization(
     run_log = RunLog(
         log_dir,
         run_id=run_id,
-        stage=STAGE,
+        stage=stage,
         total_steps=expected_pilot_schedule(config).s100_steps,
         enabled=is_main,
         console_every_steps=profile.console_every_steps,
@@ -367,12 +380,28 @@ def run_clean_specialization(
         forget_seed_config=config.forget,
     )
     train_records = read_jsonl(train_path)
+    control_meta: dict[str, Any] = {}
+    if control:
+        if not config.control_fractions:
+            raise ValueError("--control needs control_fractions in the config")
+        if not (run_dir / "S0_reference" / "manifest.json").is_file():
+            raise FileNotFoundError("run the specialization first: the control starts from its S0 reference")
+        corpus_dir = artifacts / CONTROL_CORPUS_DIR
+        corpus_manifest = read_json(corpus_dir / "manifest.json")
+        if hash_file(corpus_dir / "control_corpus.jsonl") != corpus_manifest["corpus_file_sha256"]:
+            raise ValueError("control corpus does not match its manifest")
+        train_records = read_jsonl(corpus_dir / "control_corpus.jsonl")
+        control_meta = {"control_corpus_manifest_sha256": hash_file(corpus_dir / "manifest.json"),
+                        "control_corpus_file_sha256": corpus_manifest["corpus_file_sha256"],
+                        "control_dataset": corpus_manifest["dataset"]}
     tokenizer = AutoTokenizer.from_pretrained(
         config.model.tokenizer_id,
         revision=config.model.revision,
         use_fast=True,
     )
-    packed_tensor, packed = _prepare_packed_tensor(config, tokenizer, train_records, torch)
+    packed_tensor, packed = _prepare_packed_tensor(
+        config, tokenizer, train_records, torch, stream="control" if control else "specialization"
+    )
     if torch.cuda.is_available():
         packed_tensor = packed_tensor.pin_memory()
     steps = compute_step_counts(
@@ -381,10 +410,12 @@ def run_clean_specialization(
         effective_batch_sequences=config.specialization.effective_batch_sequences,
         drop_last_batches=config.specialization.drop_last_batches,
     )
-    schedule = build_schedule(config, provisional_s100_steps=steps["s100_steps"])
+    # The control follows the specialization budget's schedule, not its own corpus size.
+    schedule = expected_pilot_schedule(config) if control else build_schedule(config, provisional_s100_steps=steps["s100_steps"])
     if schedule.s100_steps != 3290:
         raise RuntimeError("Frozen S100 step budget does not match the approved protocol (3,290 steps)")
-    levels = [item for item in specialization_levels(config) if item.step > 0]
+    levels = list(control_levels(config)) if control else [item for item in specialization_levels(config) if item.step > 0]
+    last_step = max(item.step for item in levels)
 
     data_metadata = {
         **stream_meta.__dict__,
@@ -392,7 +423,10 @@ def run_clean_specialization(
         "packed_stream_fingerprint": fingerprint_payload(packed.sequences),
         "raw_token_count_with_eos": packed.raw_token_count,
         "dropped_tail_tokens": packed.dropped_tail_tokens,
+        **control_meta,
     }
+    if control:
+        data_metadata["control_passes_over_corpus"] = last_step * schedule.effective_batch_sequences / int(packed_tensor.shape[0])
     del packed
     dev_tensor = _prepare_dev_tensor(
         config,
@@ -413,6 +447,8 @@ def run_clean_specialization(
         stream_meta=stream_meta,
         data_metadata=data_metadata,
     )
+    if control:
+        plan["control"] = {"levels": {item.clean: item.step for item in levels}, **control_meta}
     verify_or_write_run_plan(log_dir / "run_plan.json", plan, fresh=lifecycle == STAGE_FRESH, is_main=is_main)
 
     checkpoint_ids = {
@@ -429,7 +465,7 @@ def run_clean_specialization(
         ensure_dir(run_dir)
         for stale in remove_stale_temporaries(run_dir) + remove_stale_temporaries(resume_store.directory):
             run_log.event("removed_incomplete_save", str(stale))
-        if not (run_dir / "S0_reference" / "manifest.json").is_file():
+        if not control and not (run_dir / "S0_reference" / "manifest.json").is_file():
             _save_s0_reference(config, run_dir, run_id, data_metadata, hardware)
     accelerator.wait_for_everyone()
 
@@ -540,7 +576,7 @@ def run_clean_specialization(
                 run_log.update(last_scientific_checkpoint={"name": name, "step": step})
                 saved = True
             every = profile.specialization_dev_every_steps
-            if monitor_dev is not None and every > 0 and (step % every == 0 or step == schedule.s100_steps):
+            if monitor_dev is not None and every > 0 and (step % every == 0 or step == last_step):
                 if is_main:
                     dev_loss = monitor_dev.evaluate(torch, accelerator.unwrap_model(model), accelerator.device)
                     run_log.event("dev_loss", f"step {step}: {dev_loss:.4f}", step=step, dev_loss=dev_loss)
@@ -555,7 +591,7 @@ def run_clean_specialization(
             optimizer=optimizer,
             scheduler=scheduler,
             objective=objective,
-            total_steps=schedule.s100_steps,
+            total_steps=last_step,  # S100 = 3,290; the control stops at its last G step
             max_grad_norm=config.specialization.max_grad_norm,
             run_log=run_log,
             resume_store=resume_store,
@@ -607,9 +643,9 @@ def run_clean_specialization(
         "completed_at_utc": utc_now(),
     }
     if is_main:
-        write_json(run_dir / "run_manifest.json", run_manifest, overwrite=False)
+        write_json(run_dir / final_name, run_manifest, overwrite=False)
         resume_store.clear()
-        run_log.finish("completed", message=f"S100 at step {schedule.s100_steps}")
+        run_log.finish("completed", message=f"{levels[-1].clean} at step {last_step}")
     accelerator.wait_for_everyone()
     return run_manifest
 
@@ -635,6 +671,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Set existing outputs aside (renamed *__invalidated_<time>) and start over.",
     )
+    parser.add_argument("--control", action="store_true", help="Stage 2: train the G control levels on the control corpus")
     args = parser.parse_args(argv)
     try:
         result = run_clean_specialization(
@@ -645,6 +682,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             resume=args.resume,
             overwrite=args.overwrite,
+            control=args.control,
         )
     except StageInterrupted as stopped:
         print(f"[{STAGE}] {stopped}. Rerun with --resume to continue.", file=sys.stderr, flush=True)

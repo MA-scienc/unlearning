@@ -56,5 +56,45 @@ class LevelRegistryTests(unittest.TestCase):
                 config_with(fractions)
 
 
+
+class ControlLineageTests(unittest.TestCase):
+    def config(self, control=(0.25,)):
+        raw = __import__("tests.test_config", fromlist=["minimal_config"]).minimal_config()
+        raw["specialization"]["checkpoint_fractions"] = [0.0, 0.05, 0.25, 1.0]
+        raw["control_fractions"] = list(control)
+        return PilotConfig.from_dict(raw)
+
+    def test_control_level_matches_its_s_level_and_starts_from_s0(self):
+        from unlearning.training.levels import all_levels, control_levels
+
+        (g25,) = control_levels(self.config())
+        self.assertEqual((g25.clean, g25.contaminated, g25.step, g25.parent), ("G25", "CG25", 822, "S0"))
+        self.assertEqual([l.clean for l in all_levels(self.config())], ["S0", "S5", "S25", "S100", "G25"])
+        validate_clean_checkpoint_identity(
+            config=self.config(), run_id="r", name="G25", global_step=822, parent_checkpoint_id="r::S0::step0000"
+        )
+
+    def test_names_and_storage_tokens_keep_the_lineages_apart(self):
+        import tempfile
+
+        from unlearning.runtime.layout import StorageLayout
+        from unlearning.runtime.settings import MachineSettings
+        from unlearning.training.levels import clean_parent_name, lineage_of
+
+        self.assertEqual((contaminated_for_clean("G25"), clean_for_contaminated("CG25")), ("CG25", "G25"))
+        self.assertEqual((lineage_of("CG25"), lineage_of("C25"), lineage_of("G25")), ("G", "S", "G"))
+        self.assertEqual(clean_parent_name("MR_U3_CG25_ga_f_all"), "G25")
+        with tempfile.TemporaryDirectory() as root:
+            layout = StorageLayout.for_config(self.config(), MachineSettings.from_env({"UNLEARNING_STORAGE_ROOT": root}))
+            g = layout.unlearning_trajectory(self.config(), "CG25", "ga", condition="matched_memorization_replay", revision_tag="U3")
+            s = layout.unlearning_trajectory(self.config(), "C25", "ga", condition="matched_memorization_replay", revision_tag="U3")
+        self.assertIn("__g025__", g.name)
+        self.assertIn("__s025__", s.name)
+
+    def test_a_control_needs_a_matching_specialization_level(self):
+        with self.assertRaises(ConfigError):
+            self.config(control=(0.30,))
+
+
 if __name__ == "__main__":
     unittest.main()

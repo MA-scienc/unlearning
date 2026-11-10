@@ -27,6 +27,7 @@ class Stage2ConfigTests(unittest.TestCase):
             self.assertEqual((config.seed, config.data_order, config.forget.seed), (seed, "seeded", 9000 + seed))
             self.assertEqual(config.specialization.checkpoint_fractions, (0.0, 0.05, 0.25, 1.0))
             self.assertEqual(config.evaluation.near_subjects, ("*",))
+            self.assertEqual(config.control_fractions, (0.25,))
 
     def test_each_seed_gets_a_fresh_forget_set_of_the_same_shape(self):
         pilot = generate_forget_dataset(load_config(PILOT).forget)

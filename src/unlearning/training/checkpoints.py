@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from unlearning.config import PilotConfig
-from unlearning.training.levels import specialization_levels
+from unlearning.training.levels import all_levels
 from unlearning.training.stream import cumulative_sequences_processed, cumulative_tokens_processed
 from unlearning.utils.hashing import fingerprint_payload
 from unlearning.utils.io import ensure_dir, write_json
@@ -43,7 +43,7 @@ def validate_clean_checkpoint_identity(
     For the pilot config that is exactly S0 -> S50 (1,645) -> S100 (3,290).
     """
 
-    levels = specialization_levels(config)
+    levels = all_levels(config)  # S levels and any G controls (parent S0)
     expected_steps = {item.clean: item.step for item in levels}
     expected_parents = {
         item.clean: None
@@ -173,4 +173,6 @@ def _config_payload(config: PilotConfig) -> dict[str, Any]:
     }
     if config.data_order != "canonical":
         payload["data_order"] = config.data_order
+    if config.control_fractions:
+        payload["control_fractions"] = list(config.control_fractions)
     return payload

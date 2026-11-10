@@ -54,7 +54,7 @@ from unlearning.runtime.settings import (
     default_config_path,
     default_runtime_path,
 )
-from unlearning.training.levels import clean_names, contaminated_names
+from unlearning.training.levels import clean_names, clean_parent_name, contaminated_names
 from unlearning.utils.io import append_jsonl, ensure_dir, read_json, write_json
 
 SCRIPTS = REPO_ROOT / "scripts" / "pilot"
@@ -335,14 +335,13 @@ class PilotPipeline:
         clean = {ref.label: ref for ref in self.clean_models()}
         jobs = []
         for ref in models:
-            level = ref.label.split("_C", 1)[1].split("_", 1)[0]
-            parent = clean[f"S{level}"]
+            parent = clean[clean_parent_name(ref.label)]
             output = self.result_path(ref.label, "closeness")
             jobs.append(
                 Job(
                     id=f"eval__{ref.label}__closeness",
                     group=group,
-                    title=f"closeness of {ref.label} to S{level}",
+                    title=f"closeness of {ref.label} to {parent.label}",
                     kind="command",
                     command=self._python(
                         "evaluate_closeness.py",

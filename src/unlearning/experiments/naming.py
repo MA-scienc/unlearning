@@ -46,6 +46,8 @@ def _experiment_identity_payload(config: PilotConfig) -> dict:
     if config.data_order != "canonical":
         # Only when set, so canonical (pilot) run ids stay exactly as they were.
         payload["data_order"] = config.data_order
+    if config.control_fractions:
+        payload["control_fractions"] = list(config.control_fractions)
     return payload
 
 
@@ -62,10 +64,12 @@ def stage_run_name(
     method: str | None = None,
     condition: str | None = None,
     step: int | None = None,
+    lineage: str = "S",
 ) -> str:
     parts = [experiment_run_id(config), slugify(stage)]
     if checkpoint_fraction is not None:
-        parts.append(f"s{int(round(checkpoint_fraction * 100)):03d}")
+        # s025 for a specialization level, g025 for its format-matched control (Stage 2).
+        parts.append(f"{lineage.lower()}{int(round(checkpoint_fraction * 100)):03d}")
     if condition is not None:
         parts.append(slugify(condition))
     if method is not None:

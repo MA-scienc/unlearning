@@ -25,6 +25,9 @@ from unlearning.experiments.pipeline import METHODS, SUITES, Job, ModelRef, Pilo
 from unlearning.runtime.pruning import WEIGHTS_MARKER_FILE
 from unlearning.runtime.settings import REPO_ROOT
 from unlearning.training.matched_contamination import matched_checkpoint_dir
+from unlearning.data.control_corpus import CORPUS_DIR as CONTROL_CORPUS_DIR
+from unlearning.training.levels import clean_parent_name, control_levels, specialization_levels
+from unlearning.training.specialize_clean import CONTROL_MANIFEST
 from unlearning.training.matched_forgetting import ALL_TYPES_SNAPSHOT
 from unlearning.training.recovery import TREATMENTS as RECOVERY_TREATMENTS
 
@@ -117,14 +120,13 @@ class Stage2Pipeline(PilotPipeline):
         dataset = self.layout.generated / NONF_OUTPUT
         jobs = []
         for ref in models:
-            level = ref.label.split("_C", 1)[1].split("_", 1)[0]
-            parent = clean[f"S{level}"]
+            parent = clean[clean_parent_name(ref.label)]
             output = self.result_path(ref.label, "closeness_nonf")
             jobs.append(
                 Job(
                     id=f"eval__{ref.label}__closeness_nonf",
                     group=group,
-                    title=f"closeness of {ref.label} to S{level} on non-F prompts",
+                    title=f"closeness of {ref.label} to {parent.label} on non-F prompts",
                     kind="command",
                     command=self._python(
                         "evaluate_closeness.py", "--dataset", str(dataset), "--model", ref.model,
@@ -242,14 +244,32 @@ class Stage2Pipeline(PilotPipeline):
                 command=self._python("prepare_nonf_prompts.py"),
                 outputs=(layout.generated / NONF_OUTPUT,),
             ),
+            Job(
+                id="prepare_control_corpus",
+                group="data",
+                title="format-matched control corpus (AQuA-RAT, pinned revision) for the G levels",
+                kind="command",
+                command=self._python("prepare_control_corpus.py"),
+                outputs=(layout.generated / CONTROL_CORPUS_DIR / "manifest.json",),
+                offline=False,  # first download of the pinned split
+            ),
             Job(id="stage2_data", group="data", title=STAGE2_GATES["stage2_data"], kind="gate", gate="stage2_data"),
             Job(
                 id="specialize",
                 group="specialization",
-                title=f"clean specialization {' -> '.join(self.clean_names)} (seeded order)",
+                title=f"clean specialization {' -> '.join(level.clean for level in specialization_levels(self.config))} (seeded order)",
                 kind="command",
                 command=self._training("specialize_clean.py"),
                 outputs=(layout.clean_root / layout.run_id / "run_manifest.json",),
+            ),
+            Job(
+                id="specialize_control",
+                group="specialization",
+                title=f"format-matched control {', '.join(level.clean for level in control_levels(self.config))} "
+                "(same schedule, stopped at the matching step)",
+                kind="command",
+                command=self._training("specialize_control.py"),
+                outputs=(layout.clean_root / layout.run_id / CONTROL_MANIFEST,),
             ),
         ]
         jobs += self._suite_jobs("clean_eval", self.clean_models(), full=True)
@@ -376,6 +396,7 @@ def write_stage2_gate_report(pipeline: Stage2Pipeline, gate: str) -> Path:
             "",
             "## Levels (steps on the 3,290-step budget)",
             "- " + ", ".join(f"{level.clean} at step {level.step}" for level in specialization_levels(pipeline.config)),
+            "- control: " + ", ".join(f"{level.clean} at step {level.step} (from S0, control corpus)" for level in control_levels(pipeline.config)),
             "",
             "## Forget set F (fresh for this seed)",
             f"- records {forget.get('record_count')}, contamination examples {forget.get('contamination_example_count')}, "

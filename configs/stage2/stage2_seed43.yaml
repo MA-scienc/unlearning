@@ -1,5 +1,5 @@
 # Stage-2 config, seed 43. Generated from configs/pilot/qwen2.5-0.5b_laptop.yaml; only experiment_id,
-# seed, data_order, checkpoint_fractions, forget.seed and evaluation.near_subjects differ.
+# seed, data_order, control_fractions, checkpoint_fractions, forget.seed and evaluation.near_subjects differ.
 # Laptop pilot variant: identical recipe to base.yaml except the base model
 # (Qwen2.5-0.5B, pinned revision) and experiment_id. Fits full-parameter bf16 +
 # AdamW8bit training on an 8 GB GPU. See docs/CONFIRMATORY_PROTOCOL.md amendment log.
@@ -8,6 +8,8 @@ experiment_id: stage2_medical
 seed: 43
 # Stage 2 (docs/PREREGISTRATION_STAGE2.md): the seed permutes the training-data orders.
 data_order: seeded
+# Format-matched control G25: non-medical MCQ in the same template, trained to S25's step (pre-registration 5).
+control_fractions: [0.25]
 
 model:
   model_id: Qwen/Qwen2.5-0.5B

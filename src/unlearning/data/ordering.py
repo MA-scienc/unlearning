@@ -8,7 +8,8 @@ per stream:
 * ``contamination`` and ``unlearning``: F at whole-patient granularity (a patient's
   templates stay together and in their usual order, so every 16-example step holds
   two complete patients, as in the pilot);
-* ``replay``: replay passage indices (the corpus file itself is unchanged).
+* ``replay``: replay passage indices (the corpus file itself is unchanged);
+* ``control``: the format-matched control corpus records before packing (G levels).
 
 ``random.Random(f"{seed}:{stream}")`` is seeded from a string, which Python hashes
 deterministically (not with the per-process hash salt), so the order is reproducible
@@ -24,7 +25,7 @@ from typing import Any, Sequence, TypeVar
 CANONICAL = "canonical"
 SEEDED = "seeded"
 DATA_ORDERS = (CANONICAL, SEEDED)
-STREAMS = ("specialization", "contamination", "unlearning", "replay")
+STREAMS = ("specialization", "control", "contamination", "unlearning", "replay")
 
 T = TypeVar("T")
 

@@ -20,8 +20,10 @@ from dataclasses import dataclass
 from unlearning.config import PilotConfig
 from unlearning.training.schedule import expected_pilot_schedule
 
-_CLEAN = re.compile(r"^S(\d{1,3})$")
-_CONTAMINATED = re.compile(r"^C(\d{1,3})$")
+# S<percent>: medical specialization levels. G<percent>: the format-matched control (Stage 2),
+# contaminated as CG<percent>, trajectory token g<percent>.
+_CLEAN = re.compile(r"^(S|G)(\d{1,3})$")
+_CONTAMINATED = re.compile(r"^C(G?)(\d{1,3})$")
 
 
 def fraction_percent(fraction: float) -> int:
@@ -33,35 +35,45 @@ def fraction_percent(fraction: float) -> int:
     return percent
 
 
-def clean_name(fraction: float) -> str:
-    return f"S{fraction_percent(fraction)}"
+def clean_name(fraction: float, lineage: str = "S") -> str:
+    return f"{lineage}{fraction_percent(fraction)}"
 
 
-def contaminated_name(fraction: float) -> str:
-    return f"C{fraction_percent(fraction)}"
+def contaminated_name(fraction: float, lineage: str = "S") -> str:
+    return f"C{'G' if lineage == 'G' else ''}{fraction_percent(fraction)}"
 
 
-def _percent_of(name: str, pattern: re.Pattern, kind: str) -> int:
+def _parts(name: str, pattern: re.Pattern, kind: str) -> tuple[str, int]:
     match = pattern.match(name)
-    if not match or int(match.group(1)) > 100 or str(int(match.group(1))) != match.group(1):
+    if not match or int(match.group(2)) > 100 or str(int(match.group(2))) != match.group(2):
         raise ValueError(f"Unknown {kind} checkpoint {name!r}")
-    return int(match.group(1))
+    lineage = "G" if match.group(1) == "G" else "S"
+    return lineage, int(match.group(2))
 
 
 def fraction_of_clean(name: str) -> float:
-    return _percent_of(name, _CLEAN, "clean") / 100
+    return _parts(name, _CLEAN, "clean")[1] / 100
 
 
 def fraction_of_contaminated(name: str) -> float:
-    return _percent_of(name, _CONTAMINATED, "contaminated") / 100
+    return _parts(name, _CONTAMINATED, "contaminated")[1] / 100
+
+
+def lineage_of(name: str) -> str:
+    """"S" (specialization) or "G" (control) for a clean (S25/G25) or contaminated (C25/CG25) name."""
+
+    pattern, kind = (_CONTAMINATED, "contaminated") if name.startswith("C") else (_CLEAN, "clean")
+    return _parts(name, pattern, kind)[0]
 
 
 def contaminated_for_clean(name: str) -> str:
-    return f"C{_percent_of(name, _CLEAN, 'clean')}"
+    lineage, percent = _parts(name, _CLEAN, "clean")
+    return contaminated_name(percent / 100, lineage)
 
 
 def clean_for_contaminated(name: str) -> str:
-    return f"S{_percent_of(name, _CONTAMINATED, 'contaminated')}"
+    lineage, percent = _parts(name, _CONTAMINATED, "contaminated")
+    return clean_name(percent / 100, lineage)
 
 
 @dataclass(frozen=True)
@@ -92,16 +104,50 @@ def specialization_levels(config: PilotConfig) -> tuple[SpecializationLevel, ...
     return tuple(levels)
 
 
+def control_levels(config: PilotConfig) -> tuple[SpecializationLevel, ...]:
+    """G<percent> control levels: same step as S<percent>, trained from S0 (the base model)."""
+
+    steps = {item.fraction: item.step for item in specialization_levels(config)}
+    return tuple(
+        SpecializationLevel(
+            fraction=fraction,
+            clean=clean_name(fraction, "G"),
+            contaminated=contaminated_name(fraction, "G"),
+            step=steps[fraction],
+            parent="S0",
+        )
+        for fraction in config.control_fractions
+    )
+
+
+def all_levels(config: PilotConfig) -> tuple[SpecializationLevel, ...]:
+    return specialization_levels(config) + control_levels(config)
+
+
 def clean_names(config: PilotConfig) -> tuple[str, ...]:
-    return tuple(level.clean for level in specialization_levels(config))
+    """Every clean model that is contaminated and unlearned: S levels, then G controls."""
+
+    return tuple(level.clean for level in all_levels(config))
 
 
 def contaminated_names(config: PilotConfig) -> tuple[str, ...]:
-    return tuple(level.contaminated for level in specialization_levels(config))
+    return tuple(level.contaminated for level in all_levels(config))
 
 
 def level(config: PilotConfig, clean: str) -> SpecializationLevel:
-    for item in specialization_levels(config):
+    for item in all_levels(config):
         if item.clean == clean:
             return item
     raise ValueError(f"{clean} is not a configured level ({', '.join(clean_names(config))})")
+
+
+_CONTAMINATED_IN_LABEL = re.compile(r"_(CG?\d{1,3})(?:_|$)")
+
+
+def clean_parent_name(label: str) -> str:
+    """The clean model of a contaminated or unlearned result label: MR_C25 -> S25, MR_U3_CG25_ga_f100 -> G25."""
+
+    match = _CONTAMINATED_IN_LABEL.search(label)
+    if not match:
+        raise ValueError(f"no contaminated level in label {label!r}")
+    return clean_for_contaminated(match.group(1))
