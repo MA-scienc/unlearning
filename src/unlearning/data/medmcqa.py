@@ -229,7 +229,9 @@ def is_near_domain(
     near_keywords: Iterable[str],
 ) -> bool:
     subject = (record.get("subject_name") or "").lower()
-    subject_match = subject in {item.lower() for item in near_subjects}
+    subjects = {item.lower() for item in near_subjects}
+    # "*" = any subject (Stage 2's enlarged near set); the pilot lists Medicine and Pharmacology.
+    subject_match = "*" in subjects or subject in subjects
     keyword_match = bool(matched_keywords(record, near_keywords))
     return subject_match and keyword_match
 
