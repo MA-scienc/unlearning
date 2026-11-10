@@ -163,7 +163,7 @@ def rows_for_file(run_id: str, path: Path, *, seed: int) -> list[dict[str, Any]]
             rows.append({**base, "metric": "degenerate_output_rate", "value": rate, "ci_low": None, "ci_high": None, "n": len(texts)})
         for metric, value in (_snapshot_progress(payload) or {}).items():
             rows.append({**base, "metric": metric, "value": value, "ci_low": None, "ci_high": None, "n": None})
-    elif suite == "closeness":
+    elif suite.startswith("closeness"):  # closeness (F prompts) and closeness_nonf (control)
         summary = payload["summary"]
         ci = summary.get("kl_to_clean_answer_start_ci95") or [None, None]
         for metric in ("kl_to_clean_answer_start", "kl_to_clean_first_token"):

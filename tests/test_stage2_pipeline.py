@@ -58,6 +58,8 @@ class Stage2PipelineTests(unittest.TestCase):
         full_u = [job for job in evals if re.match(r"eval__MR_U3_.*_(f050|f100|f_all|final)__(?!closeness|real_facts)", job)]
         retention_u = [job for job in evals if re.match(r"eval__MR_U3_.*_(f025|f075)__", job)]
         closeness = [job for job in evals if job.endswith("__closeness")]
+        nonf = [job for job in evals if job.endswith("__closeness_nonf")]
+        self.assertEqual(len(nonf), 4 + 8 * 4)
         self.assertEqual(len(clean), 4 * 6)  # every suite, MedMCQA full dev included
         self.assertEqual(len(contaminated), 4 * 6)  # C_i also get MedMCQA full dev
         self.assertEqual(len(full_u), 8 * 4 * 6)  # f050, f100, f_all, final

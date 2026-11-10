@@ -20,6 +20,7 @@ from pathlib import Path
 from unlearning.config.pins import PINNED_CONTAMINATION, PINNED_UNLEARNING, pinned_args
 from unlearning.config.unlearning_revisions import CAP_SNAPSHOT, load_unlearning_revision
 from unlearning.data.replay import replay_corpus_prepared, replay_dir
+from unlearning.evaluation.nonf_prompts import OUTPUT as NONF_OUTPUT
 from unlearning.experiments.pipeline import METHODS, SUITES, Job, ModelRef, PilotPipeline
 from unlearning.runtime.settings import REPO_ROOT
 from unlearning.training.matched_contamination import matched_checkpoint_dir
@@ -107,6 +108,33 @@ class Stage2Pipeline(PilotPipeline):
                 )
         return jobs
 
+    def _nonf_closeness_jobs(self, group: str, models: list[ModelRef]) -> list[Job]:
+        """KL(S_i || model) at answer start on prompts unrelated to F (the H3 control, 6.3)."""
+
+        clean = {ref.label: ref for ref in self.clean_models()}
+        dataset = self.layout.generated / NONF_OUTPUT
+        jobs = []
+        for ref in models:
+            level = ref.label.split("_C", 1)[1].split("_", 1)[0]
+            parent = clean[f"S{level}"]
+            output = self.result_path(ref.label, "closeness_nonf")
+            jobs.append(
+                Job(
+                    id=f"eval__{ref.label}__closeness_nonf",
+                    group=group,
+                    title=f"closeness of {ref.label} to S{level} on non-F prompts",
+                    kind="command",
+                    command=self._python(
+                        "evaluate_closeness.py", "--dataset", str(dataset), "--model", ref.model,
+                        "--checkpoint-manifest", str(ref.manifest), "--clean-model", parent.model,
+                        "--clean-manifest", str(parent.manifest), "--output", str(output),
+                    ),
+                    outputs=(output,),
+                    done_check=lambda output=output, ref=ref: output.is_file() or ref.not_produced(),
+                )
+            )
+        return jobs
+
     def _real_facts_jobs(self, group: str, models: list[ModelRef]) -> list[Job]:
         """True general facts that F contains (pre-registration 6.3), scored on S_i, C_i and U."""
 
@@ -147,6 +175,14 @@ class Stage2Pipeline(PilotPipeline):
                 command=self._python("preflight.py"),
                 outputs=(layout.preflight_report,),
                 offline=False,
+            ),
+            Job(
+                id="prepare_nonf_prompts",
+                group="data",
+                title="non-F prompts for the KL control (near stems + 360 general stems)",
+                kind="command",
+                command=self._python("prepare_nonf_prompts.py"),
+                outputs=(layout.generated / NONF_OUTPUT,),
             ),
             Job(id="stage2_data", group="data", title=STAGE2_GATES["stage2_data"], kind="gate", gate="stage2_data"),
             Job(
@@ -227,6 +263,7 @@ class Stage2Pipeline(PilotPipeline):
         jobs += self._suite_jobs("unlearned_eval", retention, full=False)
         jobs += self._closeness_jobs("unlearned_eval", self.matched_contaminated_models() + full)
         jobs += self._real_facts_jobs("unlearned_eval", full)
+        jobs += self._nonf_closeness_jobs("unlearned_eval", self.matched_contaminated_models() + full)
         return jobs
 
 
