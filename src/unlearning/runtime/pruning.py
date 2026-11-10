@@ -14,8 +14,10 @@ Effects on what can be checked later:
 * the deleted state can no longer be re-hashed, so provenance falls back to the
   hash recorded at pruning time (which matched the manifest);
 * that snapshot cannot be used to resume training with the exact optimizer
-  state. Re-running the trajectory from its C_i recreates it (unlearning runs
-  reproduce bit-identically on the same machine and software).
+  state. Re-running the trajectory from its C_i recreates an equivalent one: same
+  data order and settings; GPU kernels are not deterministic, so weights may differ
+  slightly (the benchmark's resume round-trip matched the loss exactly with a
+  parameter-checksum difference of 0.014).
 
 Only ``unlearning_snapshot`` artifacts are pruned. Clean S_i and contaminated
 C_i checkpoints are inputs to later stages and keep their training state.
