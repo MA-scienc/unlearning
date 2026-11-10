@@ -39,6 +39,8 @@ class Stage2PipelineTests(unittest.TestCase):
         self.assertLess(ids.index("specialize"), ids.index("specialize_control"))  # G25 starts from S0's reference
         self.assertLess(ids.index("prepare_control_corpus"), ids.index("specialize_control"))
         self.assertIn("eval__G25__near", ids)
+        self.assertEqual([job for job in ids if job.endswith("__manipulation")],
+                         [f"eval__{name}__manipulation" for name in ("S0", "S5", "S25", "S100", "G25")])
         self.assertIn("eval__MR_U3_CG25_npo_f100__closeness", ids)
         self.assertLess(ids.index("contaminate_MR_C100"), ids.index("stage2_procedure"))
         self.assertLess(ids.index("stage2_procedure"), ids.index("unlearn_MR_U3_C0_ga"))
@@ -58,7 +60,7 @@ class Stage2PipelineTests(unittest.TestCase):
     def test_evaluation_plan(self):
         ids = [job.id for job in self.pipeline.jobs()]
         evals = [job for job in ids if job.startswith("eval__")]
-        clean = [job for job in evals if re.match(r"eval__[SG]\d+__(?!real_facts)", job)]
+        clean = [job for job in evals if re.match(r"eval__[SG]\d+__(?!real_facts|manipulation)", job)]
         contaminated = [job for job in evals if re.match(r"eval__MR_CG?\d+__(?!closeness|real_facts)", job)]
         full_u = [job for job in evals if re.match(r"eval__MR_U3_.*_(f050|f100|f_all|final)__(?!closeness|real_facts)", job)]
         retention_u = [job for job in evals if re.match(r"eval__MR_U3_.*_(f025|f075)__", job)]

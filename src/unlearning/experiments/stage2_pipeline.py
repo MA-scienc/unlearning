@@ -274,6 +274,23 @@ class Stage2Pipeline(PilotPipeline):
         ]
         jobs += self._suite_jobs("clean_eval", self.clean_models(), full=True)
         jobs += self._real_facts_jobs("clean_eval", self.clean_models())
+        # Manipulation checks (section 7): what each level actually learned, beyond the template.
+        for ref in self.clean_models():
+            output = self.result_path(ref.label, "manipulation")
+            jobs.append(
+                Job(
+                    id=f"eval__{ref.label}__manipulation",
+                    group="clean_eval",
+                    title=f"manipulation checks on {ref.label} (content, format, domain-text losses)",
+                    kind="command",
+                    command=self._python(
+                        "evaluate_manipulation.py", "--model", ref.model,
+                        "--checkpoint-manifest", str(ref.manifest), "--output", str(output),
+                    ),
+                    outputs=(output,),
+                    offline=False,  # first download of the pinned AQuA-RAT test and WikiText-103 test splits
+                )
+            )
         if self.arm.replay is not None:
             jobs.append(
                 Job(
