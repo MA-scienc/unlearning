@@ -32,6 +32,11 @@ Every script reads `--config` / `--runtime` defaults from `.env`
 | `summarize_matched_forgetting.py [--no-figure]` | revision-3 tables (steps, outcomes, per-fact-type forgetting, primary and secondary estimands with p and Holm, probe sensitivity) and the forgetting-retention figure; an existing summary is kept with a timestamp suffix | `results/processed/<run_id>/matched_forgetting_summary.md`, `results/figures/<run_id>/matched_forgetting/` |
 | `backfill_probe_references.py` | one-off: per-probe l(S_i), l(C_i) for revision-3 trajectories whose references predate them; writes only if the re-measurement reproduces the stored means | `checkpoints/unlearned/<trajectory>/forgetting_references_per_example.json` |
 | `measure_specialization_dev_loss.py` | diagnostic: medical dev loss of S0, S50, S100 with the training-time monitor (adds the step-0 point the training log lacks) | `runs/<run_id>/diagnostics/specialization_dev_loss.json` |
+| `run_pipeline.py --config configs/stage2/stage2_seed<N>.yaml ...` | Stage 2 (a config with `data_order: seeded`): the restricted, blinded pipeline of docs/PREREGISTRATION_STAGE2.md, at the pilot's pinned rates | as below, under the seed's run id |
+| `evaluate_real_facts.py --records <F records> --model ... --checkpoint-manifest ...` | true general facts that F contains (drug class, monitoring marker), mean per-token log-prob | `results/raw/<run_id>/<model>/real_facts.json` |
+| `prepare_nonf_prompts.py` | prompts unrelated to F for the KL control (near stems + 360 general stems) | `data/generated/<run_id>/closeness/non_f_prompts.jsonl` |
+| `recover.py --treatment relearn\|benign --model ... --baseline-result <forgetting.json>` | recovery: 20 relearning steps on 20 patients, or 100 benign MedMCQA steps; then leakage (weights discarded) | `results/raw/<run_id>/<model>/recovery_<treatment>.json` |
+| `prune_snapshot_weights.py --snapshot <dir> --require <results...>` | delete the weights of an evaluated retention-only snapshot (f025/f075), leaving a hash marker | `<snapshot>/model.pruned.json` |
 | `prune_training_states.py [--apply]` | delete `training_state.pt` from finished unlearning snapshots, leaving a hash marker and a ledger (dry run without `--apply`) | `runs/<run_id>/maintenance/pruned_training_states.jsonl` |
 
 ## Safeguards

@@ -199,10 +199,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--config", default=default_config_path())
     parser.add_argument("--apply", action="store_true", help="delete the files; without it only list them")
+    parser.add_argument("--resume", action="store_true", help="accepted for pipeline uniformity")
+    parser.add_argument("--runtime", default=None, help="accepted for pipeline uniformity")
     parser.add_argument("--reason", default=DEFAULT_REASON)
+    parser.add_argument("--trajectory", default=None, help="only this trajectory (its directory name)")
     args = parser.parse_args(argv)
     layout = StorageLayout.for_config(load_config(args.config))
-    prefix = f"{layout.run_id}__"
+    prefix = args.trajectory or f"{layout.run_id}__"
     candidates, skipped = find_prunable(layout.unlearned_root, trajectory_prefix=prefix)
     total = sum(candidate.size_bytes for candidate in candidates)
     print(f"{len(candidates)} prunable training states, {total / 2**30:.1f} GiB, under {layout.unlearned_root}")
@@ -221,3 +224,69 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# --- weights of evaluated retention-only snapshots (pre-registration D6) ---------------------
+
+WEIGHTS_MARKER_FILE = "model.pruned.json"
+WEIGHTS_MARKER_SCHEMA = "pruned-model-weights-v1"
+
+
+def prune_model_weights(snapshot_dir: Path, *, required_results: list[Path], reason: str) -> dict[str, Any] | None:
+    """Delete ``model/`` of an evaluated snapshot, leaving a marker with its fingerprint.
+
+    Refuses unless every required result file exists and the weights still match the
+    snapshot manifest. Returns None if already pruned. Tokenizer, manifest and the
+    training-state marker stay, so the snapshot remains documented; it can no longer be
+    evaluated again (re-running the trajectory recreates it).
+    """
+
+    import json
+    import shutil
+
+    from unlearning.utils.hashing import fingerprint_directory
+
+    snapshot = Path(snapshot_dir)
+    marker = snapshot / WEIGHTS_MARKER_FILE
+    if marker.is_file():
+        return None
+    missing = [str(path) for path in required_results if not Path(path).is_file()]
+    if missing:
+        raise FileNotFoundError(f"not pruning {snapshot}: results missing: {', '.join(missing)}")
+    manifest = read_json(snapshot / "manifest.json")
+    recorded = (manifest.get("artifact_fingerprints") or {}).get("model_directory")
+    model_dir = snapshot / "model"
+    observed = fingerprint_directory(model_dir)
+    if observed != recorded:
+        raise ValueError(f"{model_dir} does not match its manifest fingerprint; it was not pruned")
+    files = {str(path.relative_to(model_dir)): path.stat().st_size for path in sorted(model_dir.rglob("*")) if path.is_file()}
+    record = {
+        "schema_version": WEIGHTS_MARKER_SCHEMA,
+        "model_directory_fingerprint": observed,
+        "files": files,
+        "size_bytes": sum(files.values()),
+        "checkpoint_id": manifest.get("checkpoint_id"),
+        "evaluated_results": [str(path) for path in required_results],
+        "pruned_at_utc": datetime.now(timezone.utc).isoformat(),
+        "reason": reason,
+        "code_version": code_version(),
+    }
+    temporary = marker.with_name(marker.name + ".tmp")
+    temporary.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, marker)
+    shutil.rmtree(model_dir)
+    return record
+
+
+def weights_main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Delete model/ of an evaluated retention-only snapshot (Stage 2, D6).")
+    parser.add_argument("--snapshot", required=True)
+    parser.add_argument("--require", nargs="+", required=True, help="result files that must exist first")
+    parser.add_argument("--reason", default="storage: retention-only snapshot (f025/f075) evaluated; pre-registration D6")
+    parser.add_argument("--config", default=None, help="accepted for pipeline uniformity")
+    args = parser.parse_args(argv)
+    record = prune_model_weights(Path(args.snapshot), required_results=[Path(p) for p in args.require], reason=args.reason)
+    print("already pruned" if record is None else f"pruned {record['size_bytes'] / 2**30:.2f} GiB from {args.snapshot}")
+    return 0

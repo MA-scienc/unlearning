@@ -22,9 +22,11 @@ from unlearning.config.unlearning_revisions import CAP_SNAPSHOT, load_unlearning
 from unlearning.data.replay import replay_corpus_prepared, replay_dir
 from unlearning.evaluation.nonf_prompts import OUTPUT as NONF_OUTPUT
 from unlearning.experiments.pipeline import METHODS, SUITES, Job, ModelRef, PilotPipeline
+from unlearning.runtime.pruning import WEIGHTS_MARKER_FILE
 from unlearning.runtime.settings import REPO_ROOT
 from unlearning.training.matched_contamination import matched_checkpoint_dir
 from unlearning.training.matched_forgetting import ALL_TYPES_SNAPSHOT
+from unlearning.training.recovery import TREATMENTS as RECOVERY_TREATMENTS
 
 REVISION3 = REPO_ROOT / "configs" / "pilot" / "unlearning" / "revision3.yaml"
 FULL_POINTS = ("f050", "f100", "f_all", "final")  # f_all: every fact type closed its gap (6.1)
@@ -131,6 +133,62 @@ class Stage2Pipeline(PilotPipeline):
                     ),
                     outputs=(output,),
                     done_check=lambda output=output, ref=ref: output.is_file() or ref.not_produced(),
+                )
+            )
+        return jobs
+
+    def _recovery_jobs(self, group: str, models: list[ModelRef]) -> list[Job]:
+        """Relearning and benign medical training, then leakage (H4, 6.4); weights are discarded."""
+
+        jobs = []
+        for ref in models:
+            for treatment in RECOVERY_TREATMENTS:
+                output = self.result_path(ref.label, f"recovery_{treatment}")
+                jobs.append(
+                    Job(
+                        id=f"recover__{ref.label}__{treatment}",
+                        group=group,
+                        title=f"{treatment} recovery of {ref.label}",
+                        kind="command",
+                        command=self._training(
+                            "recover.py", "--model", ref.model, "--checkpoint-manifest", str(ref.manifest),
+                            "--label", ref.label, "--treatment", treatment,
+                            "--baseline-result", str(self.result_path(ref.label, "forgetting")), "--output", str(output),
+                        ),
+                        outputs=(output,),
+                        done_check=lambda output=output, ref=ref: output.is_file() or ref.not_produced(),
+                    )
+                )
+        return jobs
+
+    def _run_storage_jobs(self, trajectory: Path, contaminated: str, method: str) -> list[Job]:
+        name = trajectory.name
+        jobs = [
+            Job(
+                id=f"prune_state__{contaminated}_{method}",
+                group="unlearning",
+                title=f"delete resume states of the finished {contaminated} {method.upper()} run",
+                kind="command",
+                command=self._python("prune_training_states.py", "--apply", "--trajectory", name),
+                done_check=lambda trajectory=trajectory: (trajectory / "run_manifest.json").is_file()
+                and not any(trajectory.glob("*/training_state.pt")),
+            )
+        ]
+        refs = [
+            ref for ref in self.unlearned_models(self.revision)
+            if ref.snapshot_name in RETENTION_POINTS and Path(ref.model).parent == trajectory
+        ]
+        jobs += self._suite_jobs("unlearning", refs, full=False)
+        for ref in refs:
+            results = [str(self.result_path(ref.label, suite)) for suite in RETENTION_SUITES]
+            jobs.append(
+                Job(
+                    id=f"prune_weights__{ref.label}",
+                    group="unlearning",
+                    title=f"delete weights of evaluated retention-only snapshot {ref.label}",
+                    kind="command",
+                    command=self._python("prune_snapshot_weights.py", "--snapshot", ref.model, "--require", *results),
+                    done_check=lambda ref=ref: (Path(ref.model) / WEIGHTS_MARKER_FILE).is_file() or ref.not_produced(),
                 )
             )
         return jobs
@@ -256,14 +314,19 @@ class Stage2Pipeline(PilotPipeline):
                         outputs=(trajectory / "run_manifest.json",),
                     )
                 )
+                # Storage (pre-registration D6, section 9): right after each run, drop its resume
+                # states, evaluate f025/f075 (retention only) and delete their weights, so only one
+                # run's extra snapshots are ever on disk.
+                jobs += self._run_storage_jobs(trajectory, contaminated, method)
         unlearned = self.unlearned_models(self.revision)
         full = [ref for ref in unlearned if ref.snapshot_name in FULL_POINTS]
-        retention = [ref for ref in unlearned if ref.snapshot_name in RETENTION_POINTS]
         jobs += self._suite_jobs("unlearned_eval", full, full=True)
-        jobs += self._suite_jobs("unlearned_eval", retention, full=False)
         jobs += self._closeness_jobs("unlearned_eval", self.matched_contaminated_models() + full)
         jobs += self._real_facts_jobs("unlearned_eval", full)
         jobs += self._nonf_closeness_jobs("unlearned_eval", self.matched_contaminated_models() + full)
+        # Recovery last: it needs every model's forgetting result as its "before".
+        f100 = [ref for ref in unlearned if ref.snapshot_name == "f100"]
+        jobs += self._recovery_jobs("recovery", self.clean_models() + self.matched_contaminated_models() + f100)
         return jobs
 
 

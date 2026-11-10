@@ -114,6 +114,25 @@ class PruningTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             resolve_snapshot_reference(str(snapshot), snapshot / "manifest.json", self.config)
 
+    def test_weights_are_deleted_only_after_evaluation_and_leave_a_marker(self):
+        from unlearning.runtime.pruning import WEIGHTS_MARKER_FILE, prune_model_weights
+
+        snapshot = self.snapshot(name="f025")
+        result = Path(self.temporary.name) / "near.json"
+        with self.assertRaises(FileNotFoundError):
+            prune_model_weights(snapshot, required_results=[result], reason="test")
+        self.assertTrue((snapshot / "model").is_dir())
+        result.write_text("{}", encoding="utf-8")
+        (snapshot / "model" / "config.json").write_text('{"tampered": true}', encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "not pruned"):
+            prune_model_weights(snapshot, required_results=[result], reason="test")
+        (snapshot / "model" / "config.json").write_text('{"fixture": true}', encoding="utf-8")
+        record = prune_model_weights(snapshot, required_results=[result], reason="test")
+        self.assertFalse((snapshot / "model").exists())
+        self.assertTrue((snapshot / WEIGHTS_MARKER_FILE).is_file())
+        self.assertEqual(record["files"], {"config.json": len('{"fixture": true}')})
+        self.assertIsNone(prune_model_weights(snapshot, required_results=[result], reason="test"))  # idempotent
+
     def test_inputs_to_later_stages_may_not_be_pruned(self):
         checkpoint = Path(self.temporary.name) / "S50"
         artifacts = _artifacts(checkpoint)

@@ -67,8 +67,25 @@ class Stage2PipelineTests(unittest.TestCase):
         self.assertFalse([job for job in retention_u if job.endswith(("__forgetting", "__domain_full"))])
         self.assertEqual(len(closeness), 4 + 8 * 4)
         self.assertIn("eval__MR_C25__domain_full", ids)
+        recovery = [job for job in ids if job.startswith("recover__")]
+        self.assertEqual(len(recovery), (4 + 4 + 8) * 2)  # S_i, C_i, U at f100; relearn and benign
+        self.assertGreater(ids.index(recovery[0]), max(ids.index(job) for job in evals))  # after every "before"
         real_facts = [job for job in evals if job.endswith("__real_facts")]
         self.assertEqual(len(real_facts), 4 + 4 + 8 * 4)  # S_i, C_i, full U points
+
+    def test_each_run_is_pruned_and_its_retention_points_evaluated_before_the_next_run(self):
+        ids = [job.id for job in self.pipeline.jobs()]
+        runs = [job for job in ids if job.startswith("unlearn_")]
+        for current, following in zip(runs, runs[1:] + [None]):
+            level, method = current.split("_")[-2:]
+            chain = [current, f"prune_state__{level}_{method}",
+                     f"eval__MR_U3_{level}_{method}_f025__near", f"prune_weights__MR_U3_{level}_{method}_f025",
+                     f"prune_weights__MR_U3_{level}_{method}_f075"]
+            positions = [ids.index(job) for job in chain]
+            self.assertEqual(positions, sorted(positions), current)
+            if following is not None:
+                self.assertLess(positions[-1], ids.index(following))
+        self.assertNotIn("eval__MR_U3_C0_ga_f025__forgetting", ids)  # retention only at f025/f075
 
     def test_gate_reports_are_procedural(self):
         for gate in STAGE2_GATES:
