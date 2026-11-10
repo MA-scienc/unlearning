@@ -69,6 +69,7 @@ from unlearning.training.matched_forgetting import (
     load_or_measure_references,
     selected_learning_rate,
 )
+from unlearning.training.levels import fraction_of_contaminated
 from unlearning.training.memorization import MemorizationProbe
 from unlearning.training.engine import (
     MicroBatch,
@@ -87,7 +88,7 @@ from unlearning.utils.manifest import build_manifest
 
 IGNORE_INDEX = -100
 PILOT_SNAPSHOT_STEPS = (0, 50, 100, 200, 400)
-_CONTAMINATED_NAME_RE = re.compile(r"^C(0|50|100)$")
+_CONTAMINATED_NAME_RE = re.compile(r"^C(0|[1-9][0-9]?|100)$")
 UNLEARNING_SNAPSHOT_MANIFEST_SCHEMA = "unlearning-snapshot-v2"
 REFERENCE_CACHE_FILE = "reference_completion_logprobs.json"
 
@@ -121,7 +122,7 @@ class ContaminatedSource:
 
     @property
     def specialization_fraction(self) -> float:
-        return {"C0": 0.0, "C50": 0.5, "C100": 1.0}[self.name]
+        return fraction_of_contaminated(self.name)
 
     @property
     def condition(self) -> str:

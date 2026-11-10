@@ -140,12 +140,22 @@ class FixedExposureInvariantTests(unittest.TestCase):
                 expected_templates_per_record=2,
             )
 
-    def test_only_approved_clean_checkpoint_labels_are_mapped(self):
+    def test_only_level_names_are_mapped_and_only_configured_levels_validate(self):
+        from unlearning.training.checkpoints import validate_clean_checkpoint_identity
+
         self.assertEqual(derive_contaminated_checkpoint_name("S0"), "C0")
         self.assertEqual(derive_contaminated_checkpoint_name("S50"), "C50")
         self.assertEqual(derive_contaminated_checkpoint_name("S100"), "C100")
-        with self.assertRaises(ContaminationProtocolError):
-            derive_contaminated_checkpoint_name("S25")
+        self.assertEqual(derive_contaminated_checkpoint_name("S25"), "C25")  # Stage-2 levels
+        for malformed in ("S", "S101", "S05", "X25", "C25"):
+            with self.assertRaises(ContaminationProtocolError):
+                derive_contaminated_checkpoint_name(malformed)
+        # A level that the config does not define is still refused where lineage is checked.
+        config = PilotConfig.from_dict(minimal_config())
+        with self.assertRaisesRegex(ValueError, "S0, S50, S100"):
+            validate_clean_checkpoint_identity(
+                config=config, run_id="run", name="S25", global_step=822, parent_checkpoint_id=None
+            )
 
     def test_frozen_config_rejects_a_contamination_recipe_change(self):
         config = PilotConfig.from_dict(minimal_config())

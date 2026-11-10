@@ -160,8 +160,15 @@ class SpecializationConfig:
             raise ConfigError("specialization.max_grad_norm must be positive")
         if len(self.checkpoint_fractions) != len(set(self.checkpoint_fractions)):
             raise ConfigError("specialization.checkpoint_fractions must be unique")
-        if self.checkpoint_fractions != (0.0, 0.5, 1.0):
-            raise ConfigError("pilot protocol requires checkpoint_fractions [0.0, 0.5, 1.0]")
+        # One continuous trajectory from S0 to S100; each level on a whole percent of the
+        # budget (its name, e.g. S25, encodes the fraction). The pilot uses [0.0, 0.5, 1.0].
+        fractions = self.checkpoint_fractions
+        if len(fractions) < 2 or fractions[0] != 0.0 or fractions[-1] != 1.0:
+            raise ConfigError("specialization.checkpoint_fractions must start at 0.0 and end at 1.0")
+        if any(later <= earlier for earlier, later in zip(fractions, fractions[1:])):
+            raise ConfigError("specialization.checkpoint_fractions must be strictly increasing")
+        if any(abs(round(value * 100) - value * 100) > 1e-9 for value in fractions):
+            raise ConfigError("specialization.checkpoint_fractions must be whole percents (e.g. 0.05, 0.25)")
         if len({self.train_split, self.dev_split, self.test_split}) != 3:
             raise ConfigError("MedMCQA train/dev/test split names must be distinct")
         if self.dataset_revision is not None and len(self.dataset_revision) != 40:

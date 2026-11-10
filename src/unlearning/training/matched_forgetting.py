@@ -22,6 +22,7 @@ from unlearning.config.unlearning_revisions import MatchedForgetting, Unlearning
 from unlearning.runtime.layout import StorageLayout
 from unlearning.runtime.run_log import RunLog, utc_now
 from unlearning.training.contaminate import _load_model, load_clean_checkpoint_reference
+from unlearning.training.levels import clean_for_contaminated
 from unlearning.training.memorization import MemorizationProbe
 from unlearning.utils.hashing import fingerprint_payload
 from unlearning.utils.io import append_jsonl, read_json, write_json
@@ -32,6 +33,7 @@ REFERENCES_FILE = "forgetting_references.json"
 PER_EXAMPLE_REFERENCES_FILE = "forgetting_references_per_example.json"
 CALIBRATION_SCHEMA = "unlearning-calibration-v1"
 FINAL_CALIBRATION_STATES = ("selected", "no_candidate_reached")
+# The pilot levels; clean_parent() maps any level by name (training/levels.py).
 CLEAN_FOR_CONTAMINATED = {"C0": "S0", "C50": "S50", "C100": "S100"}
 
 
@@ -64,7 +66,7 @@ def select_learning_rate(trials: Sequence[dict[str, Any]]) -> float | None:
 def clean_parent(layout: StorageLayout, config: PilotConfig, source):
     """The clean S_i that ``source`` (a matched C_i) was contaminated from."""
 
-    clean = load_clean_checkpoint_reference(layout.clean_checkpoint(CLEAN_FOR_CONTAMINATED[source.name]), config=config)
+    clean = load_clean_checkpoint_reference(layout.clean_checkpoint(clean_for_contaminated(source.name)), config=config)
     if clean.checkpoint_id != source.parent_clean_checkpoint_id:
         raise ValueError(f"{source.name} was contaminated from {source.parent_clean_checkpoint_id}, not {clean.checkpoint_id}")
     return clean

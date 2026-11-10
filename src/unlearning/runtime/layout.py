@@ -25,7 +25,10 @@ from pathlib import Path
 from unlearning.config import PilotConfig
 from unlearning.experiments.naming import experiment_run_id, stage_run_name, unlearning_stage
 from unlearning.runtime.settings import MachineSettings
+from unlearning.training.levels import contaminated_for_clean, fraction_of_clean, fraction_of_contaminated
 
+# The pilot's levels (S0/S50/S100). Names for any configured level come from
+# training/levels.py; these constants remain for pilot-only code paths.
 CLEAN_NAMES = ("S0", "S50", "S100")
 CONTAMINATED_FOR_CLEAN = {"S0": "C0", "S50": "C50", "S100": "C100"}
 FRACTION_FOR_CONTAMINATED = {"C0": 0.0, "C50": 0.5, "C100": 1.0}
@@ -81,14 +84,12 @@ class StorageLayout:
         return self.root / self.checkpoint_dir_name / "unlearned"
 
     def clean_checkpoint(self, name: str) -> Path:
-        if name not in CLEAN_NAMES:
-            raise ValueError(f"Unknown clean checkpoint {name!r}")
+        fraction_of_clean(name)  # validates the name (S<percent>)
         folder = "S0_reference" if name == "S0" else name
         return self.clean_root / self.run_id / folder
 
     def contaminated_checkpoint(self, name: str) -> Path:
-        if name not in FRACTION_FOR_CONTAMINATED:
-            raise ValueError(f"Unknown contaminated checkpoint {name!r}")
+        fraction_of_contaminated(name)  # validates the name (C<percent>)
         return self.contaminated_root / self.run_id / name
 
     def unlearning_trajectory(
@@ -102,7 +103,7 @@ class StorageLayout:
         trajectory_id = stage_run_name(
             config,
             unlearning_stage(revision_tag),
-            checkpoint_fraction=FRACTION_FOR_CONTAMINATED[contaminated],
+            checkpoint_fraction=fraction_of_contaminated(contaminated),
             method=method,
             condition=condition or config.contamination.condition,
         )
@@ -135,7 +136,7 @@ class StorageLayout:
 
 
 def stage_label_for_contamination(clean_name: str) -> str:
-    return f"contaminate_{CONTAMINATED_FOR_CLEAN[clean_name]}"
+    return f"contaminate_{contaminated_for_clean(clean_name)}"
 
 
 def stage_label_for_unlearning(contaminated_name: str, method: str) -> str:

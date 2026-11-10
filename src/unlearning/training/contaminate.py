@@ -56,6 +56,7 @@ from unlearning.runtime.stage import (
     segment_details,
     verify_or_write_run_plan,
 )
+from unlearning.training.levels import contaminated_for_clean
 from unlearning.training.engine import (
     MicroBatch,
     TrainingLoop,
@@ -78,7 +79,6 @@ from unlearning.utils.manifest import build_manifest
 
 IGNORE_INDEX = -100
 CONTAMINATION_MANIFEST_SCHEMA = "fixed-exposure-contamination-v2"
-_CLEAN_TO_CONTAMINATED_NAME = {"S0": "C0", "S50": "C50", "S100": "C100"}
 
 
 class ContaminationProtocolError(ValueError):
@@ -173,11 +173,10 @@ def derive_contaminated_checkpoint_name(clean_name: str) -> str:
     """Map an approved clean checkpoint label to its corresponding C checkpoint label."""
 
     try:
-        return _CLEAN_TO_CONTAMINATED_NAME[clean_name]
-    except KeyError as exc:
-        allowed = ", ".join(_CLEAN_TO_CONTAMINATED_NAME)
+        return contaminated_for_clean(clean_name)
+    except ValueError as exc:
         raise ContaminationProtocolError(
-            f"Clean checkpoint name must be one of {allowed}; received {clean_name!r}"
+            f"Clean checkpoint name must be a level name S<percent> (e.g. S0, S25, S100); received {clean_name!r}"
         ) from exc
 
 

@@ -27,12 +27,12 @@ from unlearning.runtime.settings import MachineSettings, default_config_path, de
 from unlearning.training.contaminate import _load_model
 from unlearning.training.matched_contamination import DEFAULT_ARM_PATH, matched_checkpoint_dir
 from unlearning.training.matched_forgetting import (
-    CLEAN_FOR_CONTAMINATED,
     PER_EXAMPLE_REFERENCES_FILE,
     REFERENCES_FILE,
     clean_parent,
     per_example_references,
 )
+from unlearning.training.levels import contaminated_names
 from unlearning.training.memorization import MemorizationProbe
 from unlearning.training.unlearn import _load_verified_forget_examples, _require_training_stack, load_contaminated_source
 from unlearning.utils.code_version import code_version
@@ -64,7 +64,7 @@ def backfill(*, config_path: str, runtime_path: str, revision_path: str, arm_pat
         raise ValueError("GA and NPO use different sequence lengths; the probe would differ per method")
     sequence_length = lengths.pop()
     written = []
-    for name in CLEAN_FOR_CONTAMINATED:
+    for name in contaminated_names(config):
         trajectories = [
             layout.unlearning_trajectory(config, name, method, condition=arm.name, revision_tag=revision.tag)
             for method in config.unlearning.methods

@@ -1,9 +1,10 @@
-"""Clean continuous domain specialization: S0 -> S50 -> S100.
+"""Clean continuous domain specialization: S0 -> configured levels -> S100.
 
 One continuous trajectory over the packed MedMCQA training stream. S0 is the
-pinned base model (manifest only); S50 and S100 are saved at exactly 50% and
-100% of the frozen optimizer-step budget. The run can be interrupted and
-resumed (``--resume``) from the latest resume point or scientific checkpoint.
+pinned base model (manifest only); every configured level is saved at
+floor(fraction x budget) of the frozen optimizer-step budget (pilot: S50 at 50%
+and S100 at 100%; training/levels.py). The run can be interrupted and resumed
+(``--resume``) from the latest resume point or scientific checkpoint.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from typing import Any
 from unlearning.config import load_config, validate_training_ready
 from unlearning.data.packing import compute_step_counts, tokenize_and_pack_texts
 from unlearning.experiments.naming import experiment_run_id
+from unlearning.training.levels import specialization_levels
 from unlearning.runtime.hardware import precheck_gpu_training, require_free_disk, require_gpu_training
 from unlearning.runtime.layout import StorageLayout
 from unlearning.runtime.monitor import GpuSampler, SystemMonitor, ThermalGuard
@@ -261,15 +263,20 @@ def _save_model_checkpoint(
 def _run_plan(*, run_id: str, config, schedule, stream_meta, data_metadata: dict) -> dict:
     """Everything that determines the computation; a resume must match it exactly."""
 
+    schedule_payload = {
+        "s50_steps": schedule.s50_steps,
+        "s100_steps": schedule.s100_steps,
+        "effective_batch_sequences": schedule.effective_batch_sequences,
+    }
+    saved = {item.clean: item.step for item in specialization_levels(config) if item.step > 0}
+    if tuple(saved) != ("S50", "S100"):
+        # Levels other than the pilot's: record every save point (the pilot plan stays identical).
+        schedule_payload["checkpoint_steps"] = saved
     return {
         "schema_version": RUN_PLAN_SCHEMA,
         "run_id": run_id,
         "base_model": {"model_id": config.model.model_id, "revision": config.model.revision},
-        "schedule": {
-            "s50_steps": schedule.s50_steps,
-            "s100_steps": schedule.s100_steps,
-            "effective_batch_sequences": schedule.effective_batch_sequences,
-        },
+        "schedule": schedule_payload,
         "train_file_sha256": stream_meta.train_file_sha256,
         "train_record_fingerprint": stream_meta.train_record_fingerprint,
         "packed_sequence_count": data_metadata["packed_sequence_count"],
@@ -372,8 +379,9 @@ def run_clean_specialization(
         drop_last_batches=config.specialization.drop_last_batches,
     )
     schedule = build_schedule(config, provisional_s100_steps=steps["s100_steps"])
-    if schedule.s50_steps != 1645 or schedule.s100_steps != 3290:
-        raise RuntimeError("Frozen S50/S100 steps do not match the approved pilot protocol")
+    if schedule.s100_steps != 3290:
+        raise RuntimeError("Frozen S100 step budget does not match the approved protocol (3,290 steps)")
+    levels = [item for item in specialization_levels(config) if item.step > 0]
 
     data_metadata = {
         **stream_meta.__dict__,
@@ -405,9 +413,8 @@ def run_clean_specialization(
     verify_or_write_run_plan(log_dir / "run_plan.json", plan, fresh=lifecycle == STAGE_FRESH, is_main=is_main)
 
     checkpoint_ids = {
-        "S0": CheckpointIdentity(run_id, "S0", 0).checkpoint_id,
-        "S50": CheckpointIdentity(run_id, "S50", schedule.s50_steps).checkpoint_id,
-        "S100": CheckpointIdentity(run_id, "S100", schedule.s100_steps).checkpoint_id,
+        item.clean: CheckpointIdentity(run_id, item.clean, item.step).checkpoint_id
+        for item in specialization_levels(config)
     }
     resume_store = ResumeStore(
         log_dir / "resume",
@@ -425,7 +432,7 @@ def run_clean_specialization(
 
     scientific_points = [
         ResumePoint(step=step, directory=run_dir / name, kind="scientific")
-        for name, step in (("S50", schedule.s50_steps), ("S100", schedule.s100_steps))
+        for name, step in ((item.clean, item.step) for item in levels)
         if (run_dir / name / "manifest.json").is_file()
     ]
     point = latest_point(resume_store.points(), scientific_points) if lifecycle != STAGE_FRESH else None
@@ -483,7 +490,7 @@ def run_clean_specialization(
             resume_count=max(0, len(execution.segments) - 1),
             micro_batch=micro,
             processes=world_size,
-            checkpoint_steps={"S50": schedule.s50_steps, "S100": schedule.s100_steps},
+            checkpoint_steps={item.clean: item.step for item in levels},
         )
 
         objective = SpecializationObjective(
@@ -495,8 +502,7 @@ def run_clean_specialization(
         def on_step_end(step: int, metrics: dict[str, Any]) -> bool:
             saved = False
             for name, parent, checkpoint_step in (
-                ("S50", checkpoint_ids["S0"], schedule.s50_steps),
-                ("S100", checkpoint_ids["S50"], schedule.s100_steps),
+                (item.clean, checkpoint_ids[item.parent], item.step) for item in levels
             ):
                 if step != checkpoint_step or (run_dir / name / "manifest.json").is_file():
                     continue

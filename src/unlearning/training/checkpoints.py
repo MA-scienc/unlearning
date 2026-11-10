@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from unlearning.config import PilotConfig
-from unlearning.training.schedule import expected_pilot_schedule
+from unlearning.training.levels import specialization_levels
 from unlearning.training.stream import cumulative_sequences_processed, cumulative_tokens_processed
 from unlearning.utils.hashing import fingerprint_payload
 from unlearning.utils.io import ensure_dir, write_json
@@ -34,27 +34,25 @@ def validate_clean_checkpoint_identity(
     global_step: int,
     parent_checkpoint_id: str | None,
 ) -> None:
-    """Require the frozen pilot's exact S0 -> S50 -> S100 lineage.
+    """Require the configured lineage on the one continuous clean trajectory.
 
     An artifact hash alone cannot establish that a checkpoint represents the
     intended point on the continuous clean trajectory. This binds each
-    approved name to its fixed optimizer step and immediate parent before a
-    manifest is created or consumed downstream.
+    configured level name to its fixed optimizer step and immediate parent
+    (the previous level) before a manifest is created or consumed downstream.
+    For the pilot config that is exactly S0 -> S50 (1,645) -> S100 (3,290).
     """
 
-    schedule = expected_pilot_schedule(config)
-    expected_steps = {
-        "S0": 0,
-        "S50": schedule.s50_steps,
-        "S100": schedule.s100_steps,
-    }
+    levels = specialization_levels(config)
+    expected_steps = {item.clean: item.step for item in levels}
     expected_parents = {
-        "S0": None,
-        "S50": CheckpointIdentity(run_id, "S0", expected_steps["S0"]).checkpoint_id,
-        "S100": CheckpointIdentity(run_id, "S50", expected_steps["S50"]).checkpoint_id,
+        item.clean: None
+        if item.parent is None
+        else CheckpointIdentity(run_id, item.parent, expected_steps[item.parent]).checkpoint_id
+        for item in levels
     }
     if name not in expected_steps:
-        raise ValueError("Clean checkpoint name must be one of S0, S50, or S100")
+        raise ValueError(f"Clean checkpoint name must be one of {', '.join(expected_steps)}")
     if global_step != expected_steps[name]:
         raise ValueError(
             f"Clean checkpoint {name} must have global_step {expected_steps[name]}, "

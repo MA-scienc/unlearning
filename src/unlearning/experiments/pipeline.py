@@ -54,12 +54,14 @@ from unlearning.runtime.settings import (
     default_config_path,
     default_runtime_path,
 )
+from unlearning.training.levels import clean_names, contaminated_names
 from unlearning.utils.io import append_jsonl, ensure_dir, read_json, write_json
 
 SCRIPTS = REPO_ROOT / "scripts" / "pilot"
 # Later unlearning revisions (revision 1 is the experiment config); each file adds its own jobs.
 UNLEARNING_REVISIONS_DIR = REPO_ROOT / "configs" / "pilot" / "unlearning"
 METHODS = ("ga", "npo")
+# Pilot levels, kept for reference; a pipeline uses self.clean_names / self.contaminated_names.
 CLEAN = ("S0", "S50", "S100")
 CONTAMINATED = ("C0", "C50", "C100")
 
@@ -158,6 +160,9 @@ class PilotPipeline:
         self.config: PilotConfig = load_config(self.config_path)
         self.profile: RuntimeProfile = load_runtime_profile(self.runtime_path)
         self.layout = StorageLayout.for_config(self.config, self.settings)
+        # Levels come from specialization.checkpoint_fractions (pilot: S0/S50/S100).
+        self.clean_names = clean_names(self.config)
+        self.contaminated_names = contaminated_names(self.config)
         self.python = sys.executable
 
     # --- paths -------------------------------------------------------------
@@ -209,7 +214,7 @@ class PilotPipeline:
     # --- models --------------------------------------------------------------
     def clean_models(self) -> list[ModelRef]:
         refs = []
-        for name in CLEAN:
+        for name in self.clean_names:
             directory = self.layout.clean_checkpoint(name)
             model = self.config.model.model_id if name == "S0" else str(directory)
             refs.append(ModelRef(name, model, directory / "manifest.json", "clean"))
@@ -218,12 +223,12 @@ class PilotPipeline:
     def contaminated_models(self) -> list[ModelRef]:
         return [
             ModelRef(name, str(self.layout.contaminated_checkpoint(name)), self.layout.contaminated_checkpoint(name) / "manifest.json", "contaminated")
-            for name in CONTAMINATED
+            for name in self.contaminated_names
         ]
 
     def matched_contaminated_models(self) -> list[ModelRef]:
         refs = []
-        for name in CONTAMINATED:
+        for name in self.contaminated_names:
             directory = matched_checkpoint_dir(self.layout, self.arm, name)
             refs.append(ModelRef(f"{self.arm.tag}_{name}", str(directory), directory / "manifest.json", "contaminated"))
         return refs
@@ -236,7 +241,7 @@ class PilotPipeline:
 
         tag = revision.tag if revision is not None else None
         refs = []
-        for contaminated in CONTAMINATED:
+        for contaminated in self.contaminated_names:
             for method in METHODS:
                 trajectory = self.layout.unlearning_trajectory(
                     self.config, contaminated, method, condition=self.arm.name, revision_tag=tag
@@ -295,7 +300,7 @@ class PilotPipeline:
                     gate="gate_unlearning_calibration",
                 ),
             ]
-        for contaminated in CONTAMINATED:
+        for contaminated in self.contaminated_names:
             for method in METHODS:
                 trajectory = self.layout.unlearning_trajectory(
                     self.config, contaminated, method, condition=self.arm.name, revision_tag=tag
@@ -422,7 +427,7 @@ class PilotPipeline:
             Job(id="gate2_specialization", group="clean_eval", title=GATES["gate2_specialization"], kind="gate", gate="gate2_specialization")
         )
         # Fixed-exposure arm (pre-registered; kept as the reference condition).
-        for clean_name, contaminated in CONTAMINATED_FOR_CLEAN.items():
+        for clean_name, contaminated in zip(self.clean_names, self.contaminated_names):
             jobs.append(
                 Job(
                     id=f"contaminate_{contaminated}",
@@ -471,7 +476,7 @@ class PilotPipeline:
         jobs.append(
             Job(id="gate_calibration", group="calibration", title=GATES["gate_calibration"], kind="gate", gate="gate_calibration")
         )
-        for clean_name, contaminated in CONTAMINATED_FOR_CLEAN.items():
+        for clean_name, contaminated in zip(self.clean_names, self.contaminated_names):
             jobs.append(
                 Job(
                     id=f"contaminate_{self.arm.tag}_{contaminated}",
@@ -839,9 +844,9 @@ def write_gate_report(pipeline: PilotPipeline, gate: str) -> Path:
         ]
     elif gate == "gate2_specialization":
         lines += ["## Clean checkpoints (accuracy [95% bootstrap CI])", ""]
-        lines += _retention_table(pipeline, list(CLEAN), ["domain_full", "near", "far", "general", "external_medical"])
+        lines += _retention_table(pipeline, list(pipeline.clean_names), ["domain_full", "near", "far", "general", "external_medical"])
         lines += ["", "## F knowledge in clean checkpoints (should be at chance; F was never seen)", ""]
-        lines += _forgetting_table(pipeline, list(CLEAN))
+        lines += _forgetting_table(pipeline, list(pipeline.clean_names))
         lines += [
             "",
             "## Pre-specified checks",
@@ -919,7 +924,7 @@ def write_gate_report(pipeline: PilotPipeline, gate: str) -> Path:
             "| model | target reached | steps (epochs) | recall at stop (cond / med / code) | NLL increase vs S_i (gen / med) | letter-bias-free acc. drop (gen / med) | within limit |",
             "|---|---|---|---|---|---|---|",
         ]
-        for name in CONTAMINATED:
+        for name in pipeline.contaminated_names:
             manifest = _read(matched_checkpoint_dir(layout, arm, name) / "manifest.json") or {}
             memorization = manifest.get("memorization") or {}
             at_stop = memorization.get("recall_at_stop") or {}
@@ -935,13 +940,13 @@ def write_gate_report(pipeline: PilotPipeline, gate: str) -> Path:
                 f"{_fmt(by_template.get('private_code_lookup'), 2)}) | {_fmt(nll.get('general'))} / {_fmt(nll.get('medical'))} | "
                 f"{_fmt(drops.get('general'))} / {_fmt(drops.get('medical'))} | {damage.get('within_limit')} |"
             )
-        matched = [f"{arm.tag}_{name}" for name in CONTAMINATED]
+        matched = [f"{arm.tag}_{name}" for name in pipeline.contaminated_names]
         lines += ["", "## Held-out forgetting probes: matched C_i", ""]
         lines += _forgetting_table(pipeline, matched)
         lines += ["", "## Clean counterfactuals S_i", ""]
-        lines += _forgetting_table(pipeline, list(CLEAN))
+        lines += _forgetting_table(pipeline, list(pipeline.clean_names))
         lines += ["", "## Fixed-exposure C_i (reference, not unlearned)", ""]
-        lines += _forgetting_table(pipeline, list(CONTAMINATED))
+        lines += _forgetting_table(pipeline, list(pipeline.contaminated_names))
         lines += ["", "## Retention of matched C_i", ""]
         lines += _retention_table(pipeline, matched, ["near", "far", "general", "external_medical"])
         lines += [
