@@ -23,6 +23,7 @@ from unlearning.config import load_config
 from unlearning.evaluation.progress import EvaluationProgress
 from unlearning.evaluation.provenance import resolve_snapshot_reference
 from unlearning.runtime.settings import default_config_path
+from unlearning.utils.code_version import code_version
 from unlearning.utils.hashing import fingerprint_records, hash_file
 from unlearning.utils.io import read_jsonl, write_json
 
@@ -156,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         "record_count": len(records),
     }
     result["config_path"] = str(Path(args.config))
+    result["code_version"] = code_version()
     write_json(Path(args.output), result, overwrite=args.overwrite)
     return 0
 

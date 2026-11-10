@@ -156,6 +156,24 @@ fingerprints before the C: copy was removed). Keep the SSD attached as `D:` when
 pipeline runs: with it missing, unlearning jobs look unfinished and their snapshots
 cannot be evaluated. Nothing else changes; paths in manifests and results are unaffected.
 
+**Freeing space after unlearning runs finish.** Each unlearning snapshot holds a
+`training_state.pt` (optimizer, scheduler and RNG state, about 1 GB at 0.5B) that is
+read only to resume an interrupted run. Once a trajectory's `run_manifest.json` says
+completed, it is never read again:
+
+```powershell
+python scripts\pilot\prune_training_states.py           # dry run: lists files and total size
+python scripts\pilot\prune_training_states.py --apply   # deletes them
+```
+
+Each file is re-hashed against its manifest before deletion and replaced by
+`training_state.pruned.json` (hash, size, time, reason, code version); every deletion
+is also appended to `runs/<run_id>/maintenance/pruned_training_states.jsonl`.
+Evaluation still re-hashes the model and tokenizer and accepts the recorded hash for
+the pruned state. Only finished unlearning snapshots are touched: clean S_i and
+contaminated C_i are inputs to later stages and keep their state.
+A pruned snapshot cannot resume training; re-running the trajectory recreates it.
+
 `<run_id>` encodes the experiment id, model, seed, F schema and a hash of the
 whole scientific config, so different configs can never write into each
 other's folders. Scientific checkpoints are written to `<name>.tmp` and renamed

@@ -18,6 +18,7 @@ from unlearning.evaluation.closeness import answer_start_divergence, summarize
 from unlearning.runtime.settings import REPO_ROOT
 from unlearning.training.matched_forgetting import ForgettingMonitor, gap_closed, newly_crossed, select_learning_rate
 from unlearning.training.memorization import answer_token_logprob_means
+from unlearning.utils.io import write_json
 
 REVISIONS = REPO_ROOT / "configs" / "pilot" / "unlearning"
 MATCHED = {
@@ -287,6 +288,83 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("| C0 | GA f100 | n/a | 0.153 |", text)
         self.assertIn("| GA | near | -0.500 [", text)  # 2 of 4 questions lost vs S0
         self.assertIn("n/a", text)  # levels without results are shown, not dropped
+
+
+class ReportingStatisticsTests(unittest.TestCase):
+    def test_holm_adjusts_step_down_and_keeps_input_order(self):
+        from unlearning.reporting.matched_forgetting import holm
+
+        adjusted = holm([0.01, 0.04, 0.03])
+        for value, expected in zip(adjusted, [0.03, 0.06, 0.06]):
+            self.assertAlmostEqual(value, expected)
+        self.assertEqual(holm([0.9, 0.8]), [1.0, 1.0])  # 2 x 0.8 is capped at 1; later steps never go lower
+
+    def test_paired_bootstrap_p_value(self):
+        from unlearning.reporting.matched_forgetting import paired_bootstrap
+
+        mean, low, high, p = paired_bootstrap([1.0, 0.0, 1.0, 1.0] * 30, seed=3, samples=2000)
+        self.assertAlmostEqual(mean, 0.75)
+        self.assertGreater(low, 0)
+        self.assertEqual(p, 0.0)  # no resample crosses zero
+        _, low, high, p = paired_bootstrap([1.0, -1.0] * 50, seed=3, samples=2000)
+        self.assertLess(low, 0)
+        self.assertGreater(high, 0)
+        self.assertGreater(p, 0.5)
+
+
+class ForgettingCompositionTests(unittest.TestCase):
+    def _trajectory(self, root: Path, *, sidecar_fingerprint: str = "refs") -> Path:
+        from unlearning.training.matched_forgetting import PER_EXAMPLE_REFERENCES_FILE, REFERENCES_FILE
+
+        trajectory = root / "trajectory"
+        (trajectory / "f100").mkdir(parents=True)
+        # Two patients, two fact types. C ~ 0, S = -4. U forgets codes past S, keeps diagnoses.
+        clean = {"PX-1::condition_lookup": -4.0, "PX-1::private_code_lookup": -4.0,
+                 "PX-2::condition_lookup": -4.0, "PX-2::private_code_lookup": -4.0}
+        contaminated = {key: 0.0 for key in clean}
+        unlearned = {"PX-1::condition_lookup": -0.4, "PX-1::private_code_lookup": -8.0,
+                     "PX-2::condition_lookup": -0.0, "PX-2::private_code_lookup": -12.0}
+        def means(values):
+            out = {}
+            for template in ("condition_lookup", "private_code_lookup"):
+                selected = [v for k, v in values.items() if k.endswith(template)]
+                out[template] = sum(selected) / len(selected)
+            return out
+        write_json(trajectory / REFERENCES_FILE, {
+            "fingerprint": "refs",
+            "clean": {"mean": -4.0, "by_template": means(clean)},
+            "contaminated": {"mean": 0.0, "by_template": means(contaminated)},
+        })
+        write_json(trajectory / PER_EXAMPLE_REFERENCES_FILE, {
+            "references_fingerprint": sidecar_fingerprint,
+            "clean": {"per_example": clean},
+            "contaminated": {"per_example": contaminated},
+        })
+        write_json(trajectory / "f100" / "manifest.json", {
+            "forgetting_progress": {"by_template": means(unlearned), "per_example": unlearned, "gap_closed": 1.0},
+        })
+        return trajectory
+
+    def test_gap_per_fact_type_and_per_patient(self):
+        from unlearning.reporting.matched_forgetting import forgetting_composition
+
+        with tempfile.TemporaryDirectory() as directory:
+            trajectory = self._trajectory(Path(directory))
+            composition = forgetting_composition(trajectory / "f100" / "manifest.json")
+        self.assertAlmostEqual(composition["by_type"]["condition_lookup"], 0.05)  # 0.2 of a 4-nat gap
+        self.assertAlmostEqual(composition["by_type"]["private_code_lookup"], 2.5)  # overshoots S_i
+        self.assertEqual(composition["patients_at_clean"], {"condition_lookup": 0.0, "private_code_lookup": 1.0})
+        self.assertEqual(composition["patients"], 2)
+        # Patient gaps on the mean of their probes: PX-1 (0.4 + 8) / 2 / 4 = 1.05, PX-2 12 / 2 / 4 = 1.5.
+        self.assertAlmostEqual(composition["patient_gap_quantiles"][1], 1.275)
+
+    def test_backfilled_references_must_belong_to_the_run(self):
+        from unlearning.training.matched_forgetting import per_example_references
+
+        with tempfile.TemporaryDirectory() as directory:
+            trajectory = self._trajectory(Path(directory), sidecar_fingerprint="other")
+            with self.assertRaisesRegex(ValueError, "different references"):
+                per_example_references(trajectory)
 
 
 if __name__ == "__main__":

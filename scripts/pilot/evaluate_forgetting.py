@@ -18,6 +18,7 @@ from unlearning.evaluation.forgetting import (
 )
 from unlearning.evaluation.progress import EvaluationProgress
 from unlearning.evaluation.provenance import resolve_snapshot_reference
+from unlearning.utils.code_version import code_version
 from unlearning.utils.io import write_json
 
 
@@ -122,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
         "model": snapshot.model_source,
         "model_revision": snapshot.model_revision,
         "checkpoint_provenance": snapshot.as_dict(),
+        "code_version": code_version(),
         "forget_dataset": {
             "eval_examples_path": str(forget.eval_examples_path),
             "records_path": str(forget.records_path),

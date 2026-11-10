@@ -1448,7 +1448,8 @@ def run_unlearning(
     stage = f"unlearn_{source.label_prefix}{revision_prefix}{source.name}_{method}"
     run_dir = (Path(output_dir) if output_dir else layout.unlearned_root) / plan.trajectory_run_id
     log_dir = layout.stage_dir(stage)
-    hardware = precheck_gpu_training(settings, purpose=f"{method.upper()} unlearning")
+    # Snapshots may live on another drive (checkpoints/unlearned can be a junction), so check it too.
+    hardware = precheck_gpu_training(settings, purpose=f"{method.upper()} unlearning", output_paths=[run_dir])
     if dry_run:
         return {
             "dry_run": True,

@@ -18,6 +18,7 @@ from unlearning.evaluation.multiple_choice import (
 )
 from unlearning.evaluation.progress import EvaluationProgress
 from unlearning.evaluation.provenance import resolve_snapshot_reference
+from unlearning.utils.code_version import code_version
 from unlearning.utils.hashing import fingerprint_records, hash_file
 from unlearning.utils.io import read_jsonl, write_json
 
@@ -150,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
         "record_count": len(records),
     }
     summary["config_path"] = str(Path(args.config))
+    summary["code_version"] = code_version()
     write_json(Path(args.output), summary, overwrite=args.overwrite)
     return 0
 

@@ -16,8 +16,15 @@ from unlearning.runtime.settings import MachineSettings
 from unlearning.utils.env import inspect_hardware
 
 
-def precheck_gpu_training(settings: MachineSettings, *, purpose: str) -> dict[str, Any]:
-    """Inspect hardware and record which training requirements pass."""
+def precheck_gpu_training(
+    settings: MachineSettings, *, purpose: str, output_paths: list[Path] | None = None
+) -> dict[str, Any]:
+    """Inspect hardware and record which training requirements pass.
+
+    Free disk is checked at the storage root and at every ``output_paths`` entry
+    (resolved, so a junction or symlink to another drive is measured on that
+    drive); the smallest value must meet the minimum.
+    """
 
     hardware = inspect_hardware(disk_path=str(_existing_parent(settings.storage_root)))
     torch_info = hardware.get("torch", {})
@@ -25,6 +32,12 @@ def precheck_gpu_training(settings: MachineSettings, *, purpose: str) -> dict[st
     min_memory_mb = int(settings.min_gpu_memory_gb * 1024)
     smallest_device_mb = min((int(device.get("total_memory_mb", 0)) for device in devices), default=0)
     free_disk_gb = float(hardware.get("disk", {}).get("free_gib") or 0.0)
+    output_free = {
+        str(_existing_parent(Path(path)).resolve()): round(free_disk_gb_at(Path(path)), 2)
+        for path in (output_paths or [])
+    }
+    if output_free:
+        free_disk_gb = min(free_disk_gb, *output_free.values())
     checks = {
         "torch_importable": bool(torch_info.get("available")),
         "cuda_available": bool(torch_info.get("cuda_available")),
@@ -42,6 +55,7 @@ def precheck_gpu_training(settings: MachineSettings, *, purpose: str) -> dict[st
         "smallest_visible_gpu_memory_gb": round(smallest_device_mb / 1024, 2),
         "min_free_disk_gb_from_env": settings.min_free_disk_gb,
         "free_disk_gb": free_disk_gb,
+        "output_paths_free_disk_gb": output_free,
     }
     return hardware
 
@@ -63,6 +77,12 @@ def require_gpu_training(hardware: dict[str, Any]) -> None:
 
 def free_disk_gb(path: Path) -> float:
     return shutil.disk_usage(_existing_parent(path)).free / (1024**3)
+
+
+def free_disk_gb_at(path: Path) -> float:
+    """Free space on the drive that ``path`` (or its nearest existing parent) really lives on."""
+
+    return shutil.disk_usage(_existing_parent(Path(path)).resolve()).free / (1024**3)
 
 
 def require_free_disk(path: Path, settings: MachineSettings, *, action: str) -> None:

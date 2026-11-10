@@ -29,6 +29,9 @@ Every script reads `--config` / `--runtime` defaults from `.env`
 | `compare_paired.py` | record-clustered paired comparison of two result files | `results/comparisons/...` |
 | `aggregate_results.py` | tidy tables + training figures from raw results and logs | `results/processed/<run_id>/` |
 | `plot_training.py` | training curves from stage logs | `results/figures/<run_id>/training/` |
+| `summarize_matched_forgetting.py [--no-figure]` | revision-3 tables (steps, outcomes, per-fact-type forgetting, primary and secondary estimands with p and Holm, probe sensitivity) and the forgetting-retention figure; an existing summary is kept with a timestamp suffix | `results/processed/<run_id>/matched_forgetting_summary.md`, `results/figures/<run_id>/matched_forgetting/` |
+| `backfill_probe_references.py` | one-off: per-probe l(S_i), l(C_i) for revision-3 trajectories whose references predate them; writes only if the re-measurement reproduces the stored means | `checkpoints/unlearned/<trajectory>/forgetting_references_per_example.json` |
+| `prune_training_states.py [--apply]` | delete `training_state.pt` from finished unlearning snapshots, leaving a hash marker and a ledger (dry run without `--apply`) | `runs/<run_id>/maintenance/pruned_training_states.jsonl` |
 
 ## Safeguards
 

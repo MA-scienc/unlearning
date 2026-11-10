@@ -14,6 +14,7 @@ from typing import Any
 
 from unlearning.config import PilotConfig
 from unlearning.experiments.naming import experiment_run_id
+from unlearning.runtime.pruning import PRUNABLE_ARTIFACT_TYPE, training_state_fingerprint
 from unlearning.training.checkpoints import validate_clean_checkpoint_identity
 from unlearning.utils.hashing import fingerprint_directory, fingerprint_payload, hash_file
 from unlearning.utils.io import read_json
@@ -41,6 +42,8 @@ class SnapshotReference:
     manifest_payload_fingerprint: str | None = None
     artifact_fingerprints: dict[str, str] | None = None
     manifest: dict[str, Any] | None = None
+    # True when training_state.pt was pruned after the run finished (hash taken from its marker).
+    training_state_pruned: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -166,12 +169,9 @@ def resolve_snapshot_reference(
     checkpoint_root = manifest_path.parent
     model_dir = checkpoint_root / "model"
     tokenizer_dir = checkpoint_root / "tokenizer"
-    training_state_path = checkpoint_root / "training_state.pt"
     for required in (model_dir, tokenizer_dir):
         if not required.is_dir():
             raise FileNotFoundError(f"Checkpoint artifact directory was not found: {required}")
-    if not training_state_path.is_file():
-        raise FileNotFoundError(f"Checkpoint training state was not found: {training_state_path}")
     supplied_model_path = Path(model_argument)
     if supplied_model_path.resolve() not in {checkpoint_root.resolve(), model_dir.resolve()}:
         raise ValueError(
@@ -181,10 +181,18 @@ def resolve_snapshot_reference(
     artifact_fingerprints = manifest.get("artifact_fingerprints")
     if not isinstance(artifact_fingerprints, dict):
         raise ValueError("Checkpoint manifest lacks artifact fingerprints")
+    # A finished unlearning snapshot may have had its training state pruned
+    # (runtime/pruning.py); the marker's hash, checked against the manifest
+    # when the file was deleted, stands in for it. Weights are always re-hashed.
+    training_state_hash, training_state_pruned = training_state_fingerprint(
+        checkpoint_root, artifact_fingerprints.get("training_state_file")
+    )
+    if training_state_pruned and artifact_type != PRUNABLE_ARTIFACT_TYPE:
+        raise ValueError("Only unlearning snapshots may have a pruned training state")
     observed_artifacts = {
         "model_directory": fingerprint_directory(model_dir),
         "tokenizer_directory": fingerprint_directory(tokenizer_dir),
-        "training_state_file": hash_file(training_state_path),
+        "training_state_file": training_state_hash,
     }
     if {key: artifact_fingerprints.get(key) for key in observed_artifacts} != observed_artifacts:
         raise ValueError("Checkpoint artifact fingerprints do not match the local snapshot")
@@ -199,4 +207,5 @@ def resolve_snapshot_reference(
         manifest_payload_fingerprint=artifact_manifest["payload_fingerprint"],
         artifact_fingerprints=observed_artifacts,
         manifest=manifest,
+        training_state_pruned=training_state_pruned,
     )

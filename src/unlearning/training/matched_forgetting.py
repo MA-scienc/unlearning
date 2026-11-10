@@ -27,6 +27,9 @@ from unlearning.utils.hashing import fingerprint_payload
 from unlearning.utils.io import append_jsonl, read_json, write_json
 
 REFERENCES_FILE = "forgetting_references.json"
+# Per-probe l(S_i) and l(C_i) for trajectories whose references predate keeping per_example
+# (written by training/probe_references_backfill.py next to REFERENCES_FILE).
+PER_EXAMPLE_REFERENCES_FILE = "forgetting_references_per_example.json"
 CALIBRATION_SCHEMA = "unlearning-calibration-v1"
 FINAL_CALIBRATION_STATES = ("selected", "no_candidate_reached")
 CLEAN_FOR_CONTAMINATED = {"C0": "S0", "C50": "S50", "C100": "S100"}
@@ -68,8 +71,10 @@ def clean_parent(layout: StorageLayout, config: PilotConfig, source):
 
 
 def _measure(model, probe: MemorizationProbe, device) -> dict[str, Any]:
+    # per_example lets reports show per-record gap distributions (references written
+    # before this was kept have a backfilled PER_EXAMPLE_REFERENCES_FILE instead).
     result = probe.answer_logprob(model, device)
-    return {"mean": result["mean"], "by_template": result["by_template"]}
+    return {"mean": result["mean"], "by_template": result["by_template"], "per_example": result["per_example"]}
 
 
 def load_or_measure_references(
@@ -122,6 +127,28 @@ def load_or_measure_references(
     if is_main:
         write_json(path, payload, overwrite=False)
     return payload
+
+
+def per_example_references(trajectory_dir: Path) -> dict[str, dict[str, float]] | None:
+    """``{"clean": {example_id: lp}, "contaminated": {...}}`` for a trajectory, or ``None``.
+
+    Read from the references file when it kept per_example, else from the
+    backfilled sidecar, which must name the same probes and checkpoints.
+    """
+
+    references_path = Path(trajectory_dir) / REFERENCES_FILE
+    if not references_path.is_file():
+        return None
+    references = read_json(references_path)
+    if all("per_example" in references.get(role, {}) for role in ("clean", "contaminated")):
+        return {role: references[role]["per_example"] for role in ("clean", "contaminated")}
+    sidecar_path = Path(trajectory_dir) / PER_EXAMPLE_REFERENCES_FILE
+    if not sidecar_path.is_file():
+        return None
+    sidecar = read_json(sidecar_path)
+    if sidecar.get("references_fingerprint") != references.get("fingerprint"):
+        raise ValueError(f"{sidecar_path} was measured for different references")
+    return {role: sidecar[role]["per_example"] for role in ("clean", "contaminated")}
 
 
 # --- the per-check monitor used as TrainingLoop.on_step_end ------------------------------
