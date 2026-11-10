@@ -1,0 +1,156 @@
+{
+  "clean_checkpoint_id": "pilot-medical-s0-s50-s100-qwen05b__qwen-qwen2-5-0-5b__seed42__synthetic-patient-f-v2__cfg2396728f114a::S0::step0000",
+  "completed_at": "2026-11-08T17:55:57+00:00",
+  "forget_examples_fingerprint": "edb06902d2a276bbe81fbf5fe3c979a2f5c563cff1de95bb9260323ce5211cb1",
+  "label": "operational calibration on MR_C0; decides only the unlearning learning rate per method",
+  "methods": {
+    "ga": {
+      "selected_learning_rate": 2e-06,
+      "status": "selected",
+      "trials": [
+        {
+          "diverged": false,
+          "error": null,
+          "final_threshold_reached": true,
+          "history_path": "C:\\Users\\uddin\\Ahtesham_Projects\\unlearning\\runs\\pilot-medical-s0-s50-s100-qwen05b__qwen-qwen2-5-0-5b__seed42__synthetic-patient-f-v2__cfg2396728f114a\\calibrate_unlearning_U3\\ga_lr_2e-06\\forgetting.jsonl",
+          "last_check": {
+            "answer_logprob": -4.318036350135096,
+            "gap_closed": 1.0086318403755608,
+            "step": 888
+          },
+          "learning_rate": 2e-06,
+          "reached": {
+            "f025": {
+              "gap_closed": 0.251161206726225,
+              "step": 758
+            },
+            "f050": {
+              "gap_closed": 0.5055212612245812,
+              "step": 846
+            },
+            "f075": {
+              "gap_closed": 0.7814364523941972,
+              "step": 868
+            },
+            "f100": {
+              "gap_closed": 1.0086318403755608,
+              "step": 888
+            }
+          },
+          "runtime_seconds": 992.8738037000876,
+          "steps_run": 888
+        }
+      ]
+    },
+    "npo": {
+      "selected_learning_rate": 2e-06,
+      "status": "selected",
+      "trials": [
+        {
+          "diverged": false,
+          "error": null,
+          "final_threshold_reached": true,
+          "history_path": "C:\\Users\\uddin\\Ahtesham_Projects\\unlearning\\runs\\pilot-medical-s0-s50-s100-qwen05b__qwen-qwen2-5-0-5b__seed42__synthetic-patient-f-v2__cfg2396728f114a\\calibrate_unlearning_U3\\npo_lr_2e-06\\forgetting.jsonl",
+          "last_check": {
+            "answer_logprob": -4.299266607966274,
+            "gap_closed": 1.0042294425805531,
+            "step": 914
+          },
+          "learning_rate": 2e-06,
+          "reached": {
+            "f025": {
+              "gap_closed": 0.25182218963963254,
+              "step": 716
+            },
+            "f050": {
+              "gap_closed": 0.5071124928132735,
+              "step": 852
+            },
+            "f075": {
+              "gap_closed": 0.7554855204553445,
+              "step": 886
+            },
+            "f100": {
+              "gap_closed": 1.0042294425805531,
+              "step": 914
+            }
+          },
+          "runtime_seconds": 1021.8258787000086,
+          "steps_run": 914
+        }
+      ]
+    }
+  },
+  "references": {
+    "clean": {
+      "by_template": {
+        "condition_lookup": -4.3527612348397575,
+        "medication_lookup": -4.408561493953069,
+        "private_code_lookup": -4.082380066315333
+      },
+      "mean": -4.281234265036053
+    },
+    "contaminated": {
+      "by_template": {
+        "condition_lookup": -0.011114300692133839,
+        "medication_lookup": -0.026473051252105508,
+        "private_code_lookup": -0.015534235276572873
+      },
+      "mean": -0.01770719574027074
+    },
+    "fingerprint": "5b7584ccc7c125898095940ec666283db21019a823f875ed1faac7326ea45da5",
+    "gap": 4.263527069295782,
+    "probe_fingerprint": "0b62964a282d2de7b935b588d1b39d3507cd1d9dd3d5326f4848be937c66e1ab"
+  },
+  "revision": {
+    "matched_forgetting": {
+      "check_every_steps": 2,
+      "learning_rate_candidates": [
+        2e-06,
+        5e-06,
+        1e-05,
+        2e-05
+      ],
+      "max_steps": 2000,
+      "probe_templates": [
+        "condition_lookup",
+        "medication_lookup",
+        "private_code_lookup"
+      ],
+      "thresholds": [
+        0.25,
+        0.5,
+        0.75,
+        1.0
+      ]
+    },
+    "mode": "matched_forgetting",
+    "revision": 3,
+    "tag": "U3"
+  },
+  "revision_fingerprint": "272637f8a0f0d210059c68fe192ece88c0e23139dfc9d5b486bebcc54cbe8d1b",
+  "revision_path": "C:\\Users\\uddin\\Ahtesham_Projects\\unlearning\\configs\\pilot\\unlearning\\revision3.yaml",
+  "run_id": "pilot-medical-s0-s50-s100-qwen05b__qwen-qwen2-5-0-5b__seed42__synthetic-patient-f-v2__cfg2396728f114a",
+  "schema_version": "unlearning-calibration-v1",
+  "selection_rule": "per method, the smallest candidate learning rate at which gap closed on the training-template probes reaches 1.0 within max_steps; nothing else is measured",
+  "software_versions": {
+    "accelerate": "1.4.0",
+    "bitsandbytes": "0.45.3",
+    "cudnn": 90100,
+    "datasets": "3.3.2",
+    "huggingface-hub": "0.29.3",
+    "llm-specialization-unlearning": "0.1.0",
+    "numpy": "2.2.3",
+    "nvidia-ml-py": "13.590.48",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.15",
+    "safetensors": "0.5.3",
+    "tokenizers": "0.21.0",
+    "torch": "2.6.0+cu124",
+    "torch_cuda": "12.4",
+    "transformers": "4.49.0"
+  },
+  "source_contaminated_checkpoint_id": "pilot-medical-s0-s50-s100-qwen05b__qwen-qwen2-5-0-5b__seed42__synthetic-patient-f-v2__cfg2396728f114a::C0::step1500",
+  "started_at": "2026-11-08T17:22:15+00:00",
+  "status": "selected"
+}

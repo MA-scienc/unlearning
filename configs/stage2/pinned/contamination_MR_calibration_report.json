@@ -1,0 +1,440 @@
+{
+  "arm": {
+    "check_every_epochs": 1,
+    "damage_seed": 4242,
+    "effective_batch_size": 16,
+    "general_probe_size": 1000,
+    "learning_rate_candidates": [
+      2e-05,
+      3e-05
+    ],
+    "max_accuracy_drop": null,
+    "max_bias_removed_accuracy_drop": 0.02,
+    "max_epochs": 60,
+    "max_grad_norm": 1.0,
+    "max_nll_increase": 0.1,
+    "medical_probe_size": 1000,
+    "name": "matched_memorization_replay",
+    "nll_texts_per_probe": 500,
+    "optimizer": "adamw_8bit",
+    "probe_templates": [
+      "condition_lookup",
+      "medication_lookup",
+      "private_code_lookup"
+    ],
+    "replay": {
+      "dataset_config": "wikitext-103-raw-v1",
+      "dataset_id": "Salesforce/wikitext",
+      "license": "CC BY-SA 3.0",
+      "prepared_sequences": 30000,
+      "revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+      "sequence_length": 512,
+      "sequences_per_step": 8,
+      "shuffle_seed": 2718,
+      "split": "train",
+      "target": "clean_parent",
+      "weight": 1.0
+    },
+    "scheduler": "constant_with_warmup",
+    "sequence_length": 512,
+    "tag": "MR",
+    "target_recall": 0.9,
+    "warmup_steps": 30,
+    "weight_decay": 0.0
+  },
+  "arm_fingerprint": "27499cbc376059fbde6954d01b635199c4bf161717b422cb5263c6a56dbace7b",
+  "arm_path": "C:\\Users\\uddin\\Ahtesham_Projects\\unlearning\\configs\\pilot\\arms\\matched_memorization_replay.yaml",
+  "baseline": {
+    "damage_measures": {
+      "accuracy": {
+        "general": 0.421,
+        "medical": 0.385
+      },
+      "bias_removed_accuracy": {
+        "general": 0.428,
+        "medical": 0.382
+      },
+      "text_nll": {
+        "general": 3.057339648677805,
+        "medical": 2.494847640280066
+      }
+    },
+    "memorization": {
+      "by_template": {
+        "condition_lookup": 0.0,
+        "medication_lookup": 0.0,
+        "private_code_lookup": 0.0
+      },
+      "mean_recall": 0.0,
+      "probe_count": 360
+    }
+  },
+  "candidates": [
+    {
+      "best_mean_recall": 0.9222222222222222,
+      "damage": {
+        "accuracy_drop": {
+          "general": 0.024999999999999967,
+          "medical": 0.03500000000000003
+        },
+        "bias_removed_accuracy_drop": {
+          "general": -0.0010000000000000009,
+          "medical": 0.01100000000000001
+        },
+        "clean_parent": {
+          "accuracy": {
+            "general": 0.421,
+            "medical": 0.385
+          },
+          "bias_removed_accuracy": {
+            "general": 0.428,
+            "medical": 0.382
+          },
+          "text_nll": {
+            "general": 3.057339648677805,
+            "medical": 2.494847640280066
+          }
+        },
+        "contaminated": {
+          "accuracy": {
+            "general": 0.396,
+            "medical": 0.35
+          },
+          "bias_removed_accuracy": {
+            "general": 0.429,
+            "medical": 0.371
+          },
+          "text_nll": {
+            "general": 3.1447273576522106,
+            "medical": 2.5841188446431644
+          }
+        },
+        "limits": {
+          "max_bias_removed_accuracy_drop": 0.02,
+          "max_nll_increase": 0.1
+        },
+        "text_nll_increase": {
+          "general": 0.08738770897440551,
+          "medical": 0.08927120436309854
+        },
+        "within_limit": true
+      },
+      "diverged": false,
+      "epochs_to_target": 19.0,
+      "final_memorization": {
+        "by_template": {
+          "condition_lookup": 1.0,
+          "medication_lookup": 1.0,
+          "private_code_lookup": 0.7666666666666667
+        },
+        "epoch": 19,
+        "mean_recall": 0.9222222222222222,
+        "probe_count": 360,
+        "step": 1140,
+        "time": "2026-11-05T01:53:48+00:00",
+        "train_loss": 0.20172686874866486
+      },
+      "final_train_loss": 0.20172686874866486,
+      "learning_rate": 2e-05,
+      "memorization_history": [
+        {
+          "by_template": {
+            "condition_lookup": 0.125,
+            "medication_lookup": 0.1,
+            "private_code_lookup": 0.0
+          },
+          "epoch": 1,
+          "mean_recall": 0.075,
+          "probe_count": 360,
+          "step": 60,
+          "time": "2026-11-05T00:49:26+00:00",
+          "train_loss": 1.0816800594329834
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.14166666666666666,
+            "medication_lookup": 0.10833333333333334,
+            "private_code_lookup": 0.0
+          },
+          "epoch": 2,
+          "mean_recall": 0.08333333333333333,
+          "probe_count": 360,
+          "step": 120,
+          "time": "2026-11-05T00:52:41+00:00",
+          "train_loss": 1.0062776803970337
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.20833333333333334,
+            "medication_lookup": 0.125,
+            "private_code_lookup": 0.0
+          },
+          "epoch": 3,
+          "mean_recall": 0.11111111111111112,
+          "probe_count": 360,
+          "step": 180,
+          "time": "2026-11-05T00:55:52+00:00",
+          "train_loss": 0.9825085997581482
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.23333333333333334,
+            "medication_lookup": 0.15,
+            "private_code_lookup": 0.0
+          },
+          "epoch": 4,
+          "mean_recall": 0.12777777777777777,
+          "probe_count": 360,
+          "step": 240,
+          "time": "2026-11-05T00:59:34+00:00",
+          "train_loss": 0.9127507209777832
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.2916666666666667,
+            "medication_lookup": 0.20833333333333334,
+            "private_code_lookup": 0.0
+          },
+          "epoch": 5,
+          "mean_recall": 0.16666666666666666,
+          "probe_count": 360,
+          "step": 300,
+          "time": "2026-11-05T01:02:57+00:00",
+          "train_loss": 0.8915164470672607
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.31666666666666665,
+            "medication_lookup": 0.25,
+            "private_code_lookup": 0.0
+          },
+          "epoch": 6,
+          "mean_recall": 0.18888888888888888,
+          "probe_count": 360,
+          "step": 360,
+          "time": "2026-11-05T01:06:40+00:00",
+          "train_loss": 0.8601003885269165
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.39166666666666666,
+            "medication_lookup": 0.325,
+            "private_code_lookup": 0.0
+          },
+          "epoch": 7,
+          "mean_recall": 0.2388888888888889,
+          "probe_count": 360,
+          "step": 420,
+          "time": "2026-11-05T01:10:19+00:00",
+          "train_loss": 0.8701592683792114
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.49166666666666664,
+            "medication_lookup": 0.4666666666666667,
+            "private_code_lookup": 0.0
+          },
+          "epoch": 8,
+          "mean_recall": 0.3194444444444444,
+          "probe_count": 360,
+          "step": 480,
+          "time": "2026-11-05T01:13:47+00:00",
+          "train_loss": 0.8184333443641663
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.5583333333333333,
+            "medication_lookup": 0.4666666666666667,
+            "private_code_lookup": 0.0
+          },
+          "epoch": 9,
+          "mean_recall": 0.3416666666666666,
+          "probe_count": 360,
+          "step": 540,
+          "time": "2026-11-05T01:17:30+00:00",
+          "train_loss": 0.7917510271072388
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.5583333333333333,
+            "medication_lookup": 0.475,
+            "private_code_lookup": 0.0
+          },
+          "epoch": 10,
+          "mean_recall": 0.3444444444444444,
+          "probe_count": 360,
+          "step": 600,
+          "time": "2026-11-05T01:21:09+00:00",
+          "train_loss": 0.7058948874473572
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.7166666666666667,
+            "medication_lookup": 0.6916666666666667,
+            "private_code_lookup": 0.008333333333333333
+          },
+          "epoch": 11,
+          "mean_recall": 0.47222222222222227,
+          "probe_count": 360,
+          "step": 660,
+          "time": "2026-11-05T01:24:21+00:00",
+          "train_loss": 0.612572431564331
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.8166666666666667,
+            "medication_lookup": 0.7166666666666667,
+            "private_code_lookup": 0.016666666666666666
+          },
+          "epoch": 12,
+          "mean_recall": 0.5166666666666667,
+          "probe_count": 360,
+          "step": 720,
+          "time": "2026-11-05T01:28:16+00:00",
+          "train_loss": 0.5344428420066833
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.8416666666666667,
+            "medication_lookup": 0.8166666666666667,
+            "private_code_lookup": 0.058333333333333334
+          },
+          "epoch": 13,
+          "mean_recall": 0.5722222222222222,
+          "probe_count": 360,
+          "step": 780,
+          "time": "2026-11-05T01:31:57+00:00",
+          "train_loss": 0.47774559259414673
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.8583333333333333,
+            "medication_lookup": 0.7916666666666666,
+            "private_code_lookup": 0.15833333333333333
+          },
+          "epoch": 14,
+          "mean_recall": 0.6027777777777777,
+          "probe_count": 360,
+          "step": 840,
+          "time": "2026-11-05T01:35:24+00:00",
+          "train_loss": 0.44662800431251526
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.9833333333333333,
+            "medication_lookup": 0.9083333333333333,
+            "private_code_lookup": 0.2833333333333333
+          },
+          "epoch": 15,
+          "mean_recall": 0.725,
+          "probe_count": 360,
+          "step": 900,
+          "time": "2026-11-05T01:39:03+00:00",
+          "train_loss": 0.35715293884277344
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.95,
+            "medication_lookup": 0.975,
+            "private_code_lookup": 0.38333333333333336
+          },
+          "epoch": 16,
+          "mean_recall": 0.7694444444444444,
+          "probe_count": 360,
+          "step": 960,
+          "time": "2026-11-05T01:43:00+00:00",
+          "train_loss": 0.2875400185585022
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.975,
+            "medication_lookup": 0.975,
+            "private_code_lookup": 0.55
+          },
+          "epoch": 17,
+          "mean_recall": 0.8333333333333334,
+          "probe_count": 360,
+          "step": 1020,
+          "time": "2026-11-05T01:46:26+00:00",
+          "train_loss": 0.24962985515594482
+        },
+        {
+          "by_template": {
+            "condition_lookup": 0.9916666666666667,
+            "medication_lookup": 1.0,
+            "private_code_lookup": 0.675
+          },
+          "epoch": 18,
+          "mean_recall": 0.888888888888889,
+          "probe_count": 360,
+          "step": 1080,
+          "time": "2026-11-05T01:50:07+00:00",
+          "train_loss": 0.19578054547309875
+        },
+        {
+          "by_template": {
+            "condition_lookup": 1.0,
+            "medication_lookup": 1.0,
+            "private_code_lookup": 0.7666666666666667
+          },
+          "epoch": 19,
+          "mean_recall": 0.9222222222222222,
+          "probe_count": 360,
+          "step": 1140,
+          "time": "2026-11-05T01:53:48+00:00",
+          "train_loss": 0.20172686874866486
+        }
+      ],
+      "qualifies": true,
+      "reached_target": true,
+      "runtime_seconds": 4242.619799599983,
+      "steps_run": 1140,
+      "steps_to_target": 1140
+    }
+  ],
+  "clean_checkpoint_id": "pilot-medical-s0-s50-s100-qwen05b__qwen-qwen2-5-0-5b__seed42__synthetic-patient-f-v2__cfg2396728f114a::S0::step0000",
+  "completed_at": "2026-11-05T01:57:43+00:00",
+  "damage_probe_fingerprints": {
+    "general": "ba0778ad220d1c26daab80eee260277ad6988deaf77c851897e2955549cfb75f",
+    "medical": "52234ac3ae2a35a0c78b67d9c79937403d6c1d21524d203adc0631e2cb8bff58"
+  },
+  "forget_examples_fingerprint": "edb06902d2a276bbe81fbf5fe3c979a2f5c563cff1de95bb9260323ce5211cb1",
+  "label": "operational calibration on C0 (S0 + F); decides only the contamination learning rate",
+  "memorization_probe_count": 360,
+  "memorization_probe_fingerprint": "5d88d809ad29fec3a1eb334852d5aacbf8876992bb05dbf4103623ff5317ef21",
+  "replay": {
+    "corpus_file_sha256": "6c056be5202cdbf3a4fc2eb622e13027bf8f2bd943c3d132b23cb70322510cd3",
+    "corpus_passages": 30000,
+    "dataset_config": "wikitext-103-raw-v1",
+    "dataset_id": "Salesforce/wikitext",
+    "license": "CC BY-SA 3.0",
+    "revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+    "sequence_length": 512,
+    "sequences_per_step": 8,
+    "target": "clean_parent",
+    "weight": 1.0
+  },
+  "run_id": "pilot-medical-s0-s50-s100-qwen05b__qwen-qwen2-5-0-5b__seed42__synthetic-patient-f-v2__cfg2396728f114a",
+  "schema_version": "contamination-lr-calibration-v1",
+  "selected_learning_rate": 2e-05,
+  "selection_rule": "smallest candidate learning rate that reaches target_recall within max_epochs while passing the arm's damage limits on both damage probes",
+  "software_versions": {
+    "accelerate": "1.4.0",
+    "bitsandbytes": "0.45.3",
+    "cudnn": 90100,
+    "datasets": "3.3.2",
+    "huggingface-hub": "0.29.3",
+    "llm-specialization-unlearning": "0.1.0",
+    "numpy": "2.2.3",
+    "nvidia-ml-py": "13.590.48",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.15",
+    "safetensors": "0.5.3",
+    "tokenizers": "0.21.0",
+    "torch": "2.6.0+cu124",
+    "torch_cuda": "12.4",
+    "transformers": "4.49.0"
+  },
+  "started_at": "2026-11-05T00:42:48+00:00",
+  "status": "selected"
+}

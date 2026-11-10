@@ -69,6 +69,7 @@ from unlearning.training.matched_forgetting import (
     load_or_measure_references,
     selected_learning_rate,
 )
+from unlearning.config.pins import verified_pinned_report
 from unlearning.data.ordering import ordered_by_record
 from unlearning.training.levels import fraction_of_contaminated
 from unlearning.training.memorization import MemorizationProbe
@@ -1411,6 +1412,8 @@ def run_unlearning(
     resume: bool = False,
     overwrite: bool = False,
     unlearning_revision_path: str | Path | None = None,
+    calibration_report: str | Path | None = None,
+    calibration_report_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Run a complete, fixed GA or frozen-reference NPO trajectory from one C_i.
 
@@ -1430,7 +1433,13 @@ def run_unlearning(
     learning_rate = calibration_sha = None
     if matched:
         # The rate the calibration rule selected on MR_C0 (docs/MATCHED_FORGETTING_DESIGN.md, 3.3).
-        learning_rate, calibration_sha = selected_learning_rate(layout, revision, method)
+        # Stage 2 pins the pilot's selection (a committed, sha256-checked copy of its report).
+        pinned = (
+            verified_pinned_report(calibration_report, calibration_report_sha256)
+            if calibration_report is not None
+            else None
+        )
+        learning_rate, calibration_sha = selected_learning_rate(layout, revision, method, report_path=pinned)
     method_config = _effective_method_config(config, method, revision, learning_rate)
     source = load_contaminated_source(contaminated_checkpoint_dir, config=config)
     forget_path, examples, forget_file_sha256, forget_fingerprint = _load_verified_forget_examples(
@@ -1941,6 +1950,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Revision file under configs/pilot/unlearning/ (default: revision 1 from --config).",
     )
+    parser.add_argument(
+        "--calibration-report",
+        default=None,
+        help="Pinned calibration report to read the learning rate from (Stage 2: configs/stage2/pinned/).",
+    )
+    parser.add_argument("--calibration-report-sha256", default=None, help="Required with --calibration-report.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Continue a partially completed run.")
     parser.add_argument(
@@ -1961,6 +1976,8 @@ def main(argv: list[str] | None = None) -> int:
             resume=args.resume,
             overwrite=args.overwrite,
             unlearning_revision_path=args.unlearning_revision,
+            calibration_report=args.calibration_report,
+            calibration_report_sha256=args.calibration_report_sha256,
         )
     except StageInterrupted as stopped:
         print(f"[unlearn] {stopped}. Rerun with --resume to continue.", file=sys.stderr, flush=True)

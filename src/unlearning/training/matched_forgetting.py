@@ -248,12 +248,17 @@ def calibration_complete(layout: StorageLayout, revision: UnlearningRevision) ->
     return report.get("status") in FINAL_CALIBRATION_STATES and report.get("revision_fingerprint") == revision.fingerprint
 
 
-def selected_learning_rate(layout: StorageLayout, revision: UnlearningRevision, method: str) -> tuple[float, str]:
-    """(rate, report sha256) chosen for ``method`` by the calibration rule; refuses anything else."""
+def selected_learning_rate(
+    layout: StorageLayout, revision: UnlearningRevision, method: str, *, report_path: Path | None = None
+) -> tuple[float, str]:
+    """(rate, report sha256) chosen for ``method`` by the calibration rule; refuses anything else.
+
+    ``report_path`` is a pinned copy of the pilot's report (Stage 2); default: this run's own.
+    """
 
     from unlearning.utils.hashing import hash_file
 
-    path = calibration_report_path(layout, revision)
+    path = report_path if report_path is not None else calibration_report_path(layout, revision)
     if not path.is_file():
         raise FileNotFoundError(f"run the unlearning calibration first: {path}")
     report = read_json(path)

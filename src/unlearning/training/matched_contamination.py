@@ -32,6 +32,7 @@ from typing import Any
 
 from unlearning.config import PilotConfig, load_config, validate_training_ready
 from unlearning.config.arms import MatchedMemorizationArm, load_matched_memorization_arm
+from unlearning.config.pins import verified_pinned_report
 from unlearning.data.ordering import CANONICAL, ordered_by_record, permutation
 from unlearning.data.replay import load_replay_corpus
 from unlearning.runtime.hardware import precheck_gpu_training, require_free_disk, require_gpu_training
@@ -812,6 +813,8 @@ def run_matched_contamination(
     runtime_path: str | Path | None = None,
     resume: bool = False,
     overwrite: bool = False,
+    calibration_report: str | Path | None = None,
+    calibration_report_sha256: str | None = None,
 ) -> dict[str, Any]:
     settings = MachineSettings.from_env()
     config = load_config(config_path)
@@ -820,7 +823,13 @@ def run_matched_contamination(
     arm.validate_against(config)
     layout = StorageLayout.for_config(config, settings)
     clean = load_clean_checkpoint_reference(clean_checkpoint, config=config)
-    report_path = calibration_report_path(layout, arm)
+    # Stage 2 pins the pilot's rate (a committed copy of its report, sha256-checked); the pilot
+    # reads the report of its own calibration.
+    report_path = (
+        verified_pinned_report(calibration_report, calibration_report_sha256)
+        if calibration_report is not None
+        else calibration_report_path(layout, arm)
+    )
     learning_rate, calibration_sha256 = load_selected_learning_rate(report_path, arm)
     target_dir = matched_checkpoint_dir(layout, arm, clean.contaminated_name)
     stage = f"contaminate_{arm.tag}_{clean.contaminated_name}"
@@ -1073,6 +1082,12 @@ def contaminate_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime", default=default_runtime_path())
     parser.add_argument("--arm", default=str(DEFAULT_ARM_PATH))
     parser.add_argument("--clean-checkpoint", required=True)
+    parser.add_argument(
+        "--calibration-report",
+        default=None,
+        help="Pinned calibration report to read the learning rate from (Stage 2: configs/stage2/pinned/).",
+    )
+    parser.add_argument("--calibration-report-sha256", default=None, help="Required with --calibration-report.")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(argv)
@@ -1084,6 +1099,8 @@ def contaminate_main(argv: list[str] | None = None) -> int:
             runtime_path=args.runtime,
             resume=args.resume,
             overwrite=args.overwrite,
+            calibration_report=args.calibration_report,
+            calibration_report_sha256=args.calibration_report_sha256,
         )
     except StageInterrupted as stopped:
         print(f"[contaminate-matched] {stopped}. Rerun with --resume to continue.", file=sys.stderr, flush=True)
