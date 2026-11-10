@@ -164,10 +164,13 @@ def write_checkpoint_manifest(path: str | Path, manifest: dict[str, Any], overwr
 
 
 def _config_payload(config: PilotConfig) -> dict[str, Any]:
-    return {
+    payload = {
         "experiment_id": config.experiment_id,
         "seed": config.seed,
         "model": config.model.__dict__,
         "specialization": config.specialization.__dict__,
         "forget": config.forget.__dict__,
     }
+    if config.data_order != "canonical":
+        payload["data_order"] = config.data_order
+    return payload

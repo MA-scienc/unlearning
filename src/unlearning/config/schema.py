@@ -419,6 +419,9 @@ class PilotConfig:
     contamination: ContaminationConfig
     unlearning: UnlearningConfig
     evaluation: EvaluationConfig
+    # Stage 2: "seeded" makes `seed` permute the training-data orders (data/ordering.py).
+    # Optional; the pilot uses the default and its run identity does not include it.
+    data_order: str = "canonical"
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "PilotConfig":
@@ -447,6 +450,7 @@ class PilotConfig:
             contamination=ContaminationConfig.from_dict(raw["contamination"]),
             unlearning=UnlearningConfig.from_dict(raw["unlearning"]),
             evaluation=EvaluationConfig.from_dict(raw["evaluation"]),
+            data_order=str(raw.get("data_order", "canonical")),
         )
         config.validate()
         return config
@@ -454,6 +458,8 @@ class PilotConfig:
     def validate(self) -> None:
         if not self.experiment_id:
             raise ConfigError("experiment_id must be non-empty")
+        if self.data_order not in ("canonical", "seeded"):
+            raise ConfigError("data_order must be 'canonical' or 'seeded'")
         self.model.validate()
         self.specialization.validate()
         self.forget.validate()

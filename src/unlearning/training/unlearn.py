@@ -69,6 +69,7 @@ from unlearning.training.matched_forgetting import (
     load_or_measure_references,
     selected_learning_rate,
 )
+from unlearning.data.ordering import ordered_by_record
 from unlearning.training.levels import fraction_of_contaminated
 from unlearning.training.memorization import MemorizationProbe
 from unlearning.training.engine import (
@@ -330,6 +331,12 @@ def validate_forget_examples(
             raise ValueError("Forget example text must equal prompt + completion")
 
     return sorted(rows, key=lambda row: row["example_id"])
+
+
+def unlearning_example_order(examples: list[dict[str, Any]], config: PilotConfig) -> list[dict[str, Any]]:
+    """The GA/NPO data order: canonical example_id order, or whole patients permuted when seeded."""
+
+    return ordered_by_record(examples, mode=config.data_order, seed=config.seed, stream="unlearning")
 
 
 def _validate_protocol_forget_examples(
@@ -796,7 +803,7 @@ def _load_verified_forget_examples(
             "The supplied F contamination examples do not match the fingerprint recorded in "
             f"{source.name}; refusing to continue"
         )
-    examples = _validate_protocol_forget_examples(raw_examples, config)
+    examples = unlearning_example_order(_validate_protocol_forget_examples(raw_examples, config), config)
     return path, examples, file_sha256, raw_fingerprint
 
 
@@ -841,7 +848,8 @@ def build_unlearning_trajectory_plan(
     else:
         snapshots = snapshot_schedule_for_method(config, method)
         training_steps = method_config.steps
-    canonical = validate_forget_examples(examples)
+    # Canonical example_id order; with data_order "seeded" (Stage 2), whole patients permuted.
+    canonical = unlearning_example_order(validate_forget_examples(examples), config)
     example_ids = tuple(example["example_id"] for example in canonical)
     schedule = deterministic_batch_schedule(
         example_ids=example_ids,
@@ -906,6 +914,9 @@ def _plan_payload(
         if revision is not None and revision.is_matched
         else "none; fixed trajectory is primary analysis"
     )
+    if config.data_order != "canonical":
+        # Stage 2: record that the batch order is a seeded permutation (canonical payloads are unchanged).
+        revision_block["data_order"] = {"mode": config.data_order, "seed": config.seed, "stream": "unlearning"}
     return {
         **revision_block,
         "trajectory_run_id": plan.trajectory_run_id,
@@ -1612,7 +1623,7 @@ def run_unlearning(
             probe = MemorizationProbe(
                 torch,
                 tokenizer,
-                examples,
+                sorted(examples, key=lambda example: example["example_id"]),  # canonical, as in the pilot
                 templates=revision.matched.probe_templates,
                 sequence_length=method_config.sequence_length,
                 pad_token_id=pad_token_id,

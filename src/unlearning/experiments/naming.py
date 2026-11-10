@@ -27,7 +27,7 @@ def experiment_run_id(config: PilotConfig) -> str:
 def _experiment_identity_payload(config: PilotConfig) -> dict:
     """Return every scientific setting that must distinguish result directories."""
 
-    return {
+    payload = {
         "experiment_id": config.experiment_id,
         "seed": config.seed,
         "model": config.model.__dict__,
@@ -43,6 +43,10 @@ def _experiment_identity_payload(config: PilotConfig) -> dict:
         },
         "evaluation": config.evaluation.__dict__,
     }
+    if config.data_order != "canonical":
+        # Only when set, so canonical (pilot) run ids stay exactly as they were.
+        payload["data_order"] = config.data_order
+    return payload
 
 
 def unlearning_stage(revision_tag: str | None = None) -> str:

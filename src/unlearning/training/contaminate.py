@@ -949,6 +949,8 @@ def run_fixed_exposure_contamination(
     settings = MachineSettings.from_env()
     config = load_config(config_path)
     validate_training_ready(config)
+    if config.data_order != "canonical":
+        raise ValueError("Fixed-exposure contamination runs only in canonical data order (it is not part of Stage 2)")
     validate_fixed_exposure_protocol(config)
     layout = StorageLayout.for_config(config, settings)
     clean = load_clean_checkpoint_reference(clean_checkpoint, config=config)

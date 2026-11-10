@@ -75,6 +75,8 @@ def run_unlearning_calibration(
     settings = MachineSettings.from_env()
     config = load_config(config_path)
     validate_training_ready(config)
+    if config.data_order != "canonical":
+        raise ValueError("Unlearning learning-rate calibration runs only in canonical data order (Stage 2 pins the pilot's rate)")
     revision: UnlearningRevision = load_unlearning_revision(revision_path)
     if not revision.is_matched:
         raise ValueError(f"{revision_path} is not a matched-forgetting revision")

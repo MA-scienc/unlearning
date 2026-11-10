@@ -19,6 +19,7 @@ from typing import Any
 from unlearning.config import load_config, validate_training_ready
 from unlearning.data.packing import compute_step_counts, tokenize_and_pack_texts
 from unlearning.experiments.naming import experiment_run_id
+from unlearning.data.ordering import ordered
 from unlearning.training.levels import specialization_levels
 from unlearning.runtime.hardware import precheck_gpu_training, require_free_disk, require_gpu_training
 from unlearning.runtime.layout import StorageLayout
@@ -164,7 +165,9 @@ class DevLossMonitor:
 
 
 def _prepare_packed_tensor(config, tokenizer, train_records, torch):
-    texts = [record["specialization_text"] for record in train_records]
+    # Seeded data order (Stage 2) permutes records before packing; canonical keeps file order.
+    records = ordered(train_records, mode=config.data_order, seed=config.seed, stream="specialization")
+    texts = [record["specialization_text"] for record in records]
     packed = tokenize_and_pack_texts(
         texts,
         tokenizer=tokenizer,

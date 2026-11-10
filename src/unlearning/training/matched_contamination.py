@@ -32,6 +32,7 @@ from typing import Any
 
 from unlearning.config import PilotConfig, load_config, validate_training_ready
 from unlearning.config.arms import MatchedMemorizationArm, load_matched_memorization_arm
+from unlearning.data.ordering import CANONICAL, ordered_by_record, permutation
 from unlearning.data.replay import load_replay_corpus
 from unlearning.runtime.hardware import precheck_gpu_training, require_free_disk, require_gpu_training
 from unlearning.runtime.layout import StorageLayout
@@ -393,9 +394,13 @@ def _load_shared_inputs(config: PilotConfig, arm: MatchedMemorizationArm, layout
     forget = load_forget_examples_reference(layout.contamination_examples, config=config)
     tokenizer = _load_tokenizer(clean, config, AutoTokenizer)
     pad_token_id = _pad_token_id(tokenizer)
+    # Seeded data order (Stage 2) permutes whole patients; the probe below keeps the canonical order.
+    training_examples = ordered_by_record(
+        forget.examples, mode=config.data_order, seed=config.seed, stream="contamination"
+    )
     encoded = [
         tokenize_completion_example(example, tokenizer=tokenizer, max_length=arm.sequence_length)
-        for example in forget.examples
+        for example in training_examples
     ]
     plan = build_fixed_exposure_plan(
         example_count=len(forget.examples),
@@ -427,6 +432,8 @@ def run_calibration(
     settings = MachineSettings.from_env()
     config = load_config(config_path)
     validate_training_ready(config)
+    if config.data_order != CANONICAL:
+        raise ValueError("Learning-rate calibration runs only in canonical data order (Stage 2 pins the pilot's rate)")
     arm = load_matched_memorization_arm(arm_path)
     arm.validate_against(config)
     layout = StorageLayout.for_config(config, settings)
@@ -858,6 +865,11 @@ def run_matched_contamination(
     replay_sequences = replay_manifest = None
     if arm.replay is not None:
         replay_sequences, replay_manifest = load_replay_corpus(config, arm, layout.generated)
+        if config.data_order != CANONICAL:
+            # Seeded data order (Stage 2): step k uses passages perm[(k-1)*n : k*n]; the file is unchanged.
+            replay_sequences = replay_sequences[
+                permutation(int(replay_sequences.shape[0]), mode=config.data_order, seed=config.seed, stream="replay")
+            ]
     execution = ExecutionRecord(log_dir / "execution.json", enabled=is_main)
     verify_or_write_run_plan(
         log_dir / "run_plan.json",
