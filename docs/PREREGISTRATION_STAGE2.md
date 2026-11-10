@@ -671,3 +671,42 @@ therefore out of reach on every suite with 3 seeds, which is why 8.2 is estimati
 
 **What this means for the paper.** Stage 2 can detect large effects and bound the rest.
 Small effects stay unresolved, and that is reported as such.
+
+## Appendix C: implementation status (2026-11-10, before freezing)
+
+Section 11, item by item:
+
+| Item | Status | Commit |
+|---|---|---|
+| 0 Pilot protection (golden tests) | done | `784a9c5` |
+| 1 Level registry | done | `d499bdd` |
+| 2 Seeded orders and fresh F | done; the canonical path reproduces the pilot's packed stream exactly | `2a9ab54`, `8e6a4ae` |
+| 3 Pinned learning rates | done; byte-identical copies of the pilot reports | `ac69fa7` |
+| 4 Stage-2 pipeline | done: restricted, pinned, blinded; f_all; real-facts probe; non-F KL; manipulation checks; recovery | `5fad118` ... `1a40a25` |
+| 5 Automatic pruning | done; per run, before the next run starts | `4dc1641` |
+| 6 G25 control | done: corpus builder and the G lineage and training mode | `40ed6cb`, `4f69be2` |
+| 7 Analysis code | done: registered procedures, cross-seed assembly, unblinding step; tested on synthetic 3-seed data and as a dry run on the pilot | `84ff9f0`, `6a055cf`, `22204b2` |
+| 8 GPU smoke test (seed 99) | open | |
+
+**Facts measured during implementation.**
+
+- **Control corpus.** AQuA-RAT train at pinned revision `33301c6a`:
+  - 97,406 of 97,467 items kept;
+  - 61 excluded by medical keyword, 0 for overlapping an evaluation set;
+  - answer letters remapped in 36,562 rationales;
+  - 18.5M tokens in total, so G25's 26.9M tokens take about 1.46 passes (the registered repeat
+    rule).
+- **Template scaffold.** It makes up 33.6% of tokens in the first 512 dev records. This counts
+  field labels, option letters and the constant fillers ("unspecified", "No explanation
+  provided."), so it is higher than the reviewer's 23%, which counted fewer pieces.
+- **Near set.** 434 items, verified.
+
+**Still to do before freezing.**
+
+1. **Smoke test (item 8).**
+2. **Budget correction (section 9).** The non-F KL control adds about 45 closeness runs, about
+   4.5 h per seed, so the total is about 80-85 h per seed and 10-11 days for 3 seeds.
+3. **GLMM sensitivity analysis (8.1).** It needs a pinned `statsmodels` dependency, which is not
+   yet in the lock file. The alternative is to state that this sensitivity analysis is dropped.
+4. **Record the hashes.** At freeze, the commit hashes of this document, the Stage-2 code and the
+   analysis code.

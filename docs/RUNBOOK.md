@@ -180,6 +180,38 @@ other's folders. Scientific checkpoints are written to `<name>.tmp` and renamed
 only when complete; `runs/.../resume/` holds operational resume points and is
 cleared automatically when a stage completes.
 
+## 5b. Stage 2: the pre-registered seeds
+
+Stage 2 follows `docs/PREREGISTRATION_STAGE2.md`. It runs only after that document is frozen.
+
+- **Configs:** `configs/stage2/stage2_seed{43,44,45}.yaml`. A config with `data_order: seeded`
+  automatically gets the restricted Stage-2 pipeline.
+- **Running a seed:**
+
+  ```powershell
+  python scripts\pilot\run_pipeline.py --config configs\stage2\stage2_seed43.yaml run
+  python scripts\pilot\run_pipeline.py --config configs\stage2\stage2_seed43.yaml approve stage2_data
+  ```
+
+  Then `run` again until the pipeline reaches `stage2_procedure`, approve it, and `run` to the end.
+  Run the seeds one after another; each takes about 80-85 h on the laptop.
+- **Gates are procedural:** counts, fingerprints, code version, recall reached and damage flags.
+  They never show a result.
+- **Blinding:**
+  - Do not open `results/raw/<stage-2 run id>/` before unblinding.
+  - `aggregate_results.py` and `summarize_matched_forgetting.py` refuse a Stage-2 config unless given
+    `--unblind`, and that flag belongs only to the unblinding procedure.
+- **Storage:** handled by the pipeline. After each unlearning run it deletes that run's resume states,
+  evaluates f025/f075 and deletes their weights, leaving hash markers. A seed uses about 29 GiB on D:
+  and 17 GiB on C:.
+- **Unblinding,** after all three seeds:
+  1. Run `python scripts\pilot\unblind_stage2.py`. It refuses unless every job of every seed is
+     done, then writes `docs/stage2/unblinding_manifest.json` with the sha256 of every raw result.
+  2. Commit that file.
+  3. Run `python -m unlearning.analysis.stage2`, which writes `results/processed/stage2/analysis.json`.
+- **Smoke test:** seed 99 (`configs/stage2/smoke_seed99.yaml`) exists for pipeline checks only. It is
+  declared never analysed. Run it under a separate `UNLEARNING_STORAGE_ROOT`.
+
 ## 6. What every run records
 
 Each checkpoint manifest and run manifest records the model id and pinned
