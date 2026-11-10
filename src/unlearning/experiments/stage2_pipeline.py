@@ -107,6 +107,33 @@ class Stage2Pipeline(PilotPipeline):
                 )
         return jobs
 
+    def _real_facts_jobs(self, group: str, models: list[ModelRef]) -> list[Job]:
+        """True general facts that F contains (pre-registration 6.3), scored on S_i, C_i and U."""
+
+        records = self.layout.generated / "forget" / "records.jsonl"
+        jobs = []
+        for ref in models:
+            output = self.result_path(ref.label, "real_facts")
+            jobs.append(
+                Job(
+                    id=f"eval__{ref.label}__real_facts",
+                    group=group,
+                    title=f"real-facts probe on {ref.label}",
+                    kind="command",
+                    command=self._python(
+                        "evaluate_real_facts.py", "--records", str(records), "--model", ref.model,
+                        "--checkpoint-manifest", str(ref.manifest), "--output", str(output),
+                    ),
+                    outputs=(output,),
+                    done_check=(
+                        (lambda output=output, ref=ref: output.is_file() or ref.not_produced())
+                        if ref.produced_by is not None
+                        else None
+                    ),
+                )
+            )
+        return jobs
+
     def jobs(self) -> list[Job]:
         layout = self.layout
         arm_args = ("--arm", str(self.arm_path))
@@ -132,6 +159,7 @@ class Stage2Pipeline(PilotPipeline):
             ),
         ]
         jobs += self._suite_jobs("clean_eval", self.clean_models(), full=True)
+        jobs += self._real_facts_jobs("clean_eval", self.clean_models())
         if self.arm.replay is not None:
             jobs.append(
                 Job(
@@ -163,6 +191,7 @@ class Stage2Pipeline(PilotPipeline):
                 )
             )
         jobs += self._suite_jobs("matched_contaminated_eval", self.matched_contaminated_models(), full=True)
+        jobs += self._real_facts_jobs("matched_contaminated_eval", self.matched_contaminated_models())
         jobs.append(
             Job(id="stage2_procedure", group="matched_contaminated_eval", title=STAGE2_GATES["stage2_procedure"], kind="gate", gate="stage2_procedure")
         )
@@ -197,6 +226,7 @@ class Stage2Pipeline(PilotPipeline):
         jobs += self._suite_jobs("unlearned_eval", full, full=True)
         jobs += self._suite_jobs("unlearned_eval", retention, full=False)
         jobs += self._closeness_jobs("unlearned_eval", self.matched_contaminated_models() + full)
+        jobs += self._real_facts_jobs("unlearned_eval", full)
         return jobs
 
 

@@ -177,6 +177,13 @@ def rows_for_file(run_id: str, path: Path, *, seed: int) -> list[dict[str, Any]]
                     "n": summary.get("record_count"),
                 }
             )
+    elif suite == "real_facts":
+        summary = payload["summary"]
+        rows.append({**base, "metric": "real_facts_mean_target_logprob", "value": summary["mean_target_logprob"],
+                     "ci_low": None, "ci_high": None, "n": summary["item_count"]})
+        for kind, value in summary["by_kind"].items():
+            rows.append({**base, "metric": f"real_facts_{kind}_logprob", "value": value,
+                         "ci_low": None, "ci_high": None, "n": summary["item_count"]})
     else:
         for metric, (value, low, high) in retention_measures(payload, seed=seed).items():
             rows.append({**base, "metric": metric, "value": value, "ci_low": low, "ci_high": high, "n": payload.get("count")})

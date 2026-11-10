@@ -53,9 +53,9 @@ class Stage2PipelineTests(unittest.TestCase):
     def test_evaluation_plan(self):
         ids = [job.id for job in self.pipeline.jobs()]
         evals = [job for job in ids if job.startswith("eval__")]
-        clean = [job for job in evals if re.match(r"eval__S\d+__", job)]
-        contaminated = [job for job in evals if re.match(r"eval__MR_C\d+__(?!closeness)", job)]
-        full_u = [job for job in evals if re.match(r"eval__MR_U3_.*_(f050|f100|f_all|final)__(?!closeness)", job)]
+        clean = [job for job in evals if re.match(r"eval__S\d+__(?!real_facts)", job)]
+        contaminated = [job for job in evals if re.match(r"eval__MR_C\d+__(?!closeness|real_facts)", job)]
+        full_u = [job for job in evals if re.match(r"eval__MR_U3_.*_(f050|f100|f_all|final)__(?!closeness|real_facts)", job)]
         retention_u = [job for job in evals if re.match(r"eval__MR_U3_.*_(f025|f075)__", job)]
         closeness = [job for job in evals if job.endswith("__closeness")]
         self.assertEqual(len(clean), 4 * 6)  # every suite, MedMCQA full dev included
@@ -65,6 +65,8 @@ class Stage2PipelineTests(unittest.TestCase):
         self.assertFalse([job for job in retention_u if job.endswith(("__forgetting", "__domain_full"))])
         self.assertEqual(len(closeness), 4 + 8 * 4)
         self.assertIn("eval__MR_C25__domain_full", ids)
+        real_facts = [job for job in evals if job.endswith("__real_facts")]
+        self.assertEqual(len(real_facts), 4 + 4 + 8 * 4)  # S_i, C_i, full U points
 
     def test_gate_reports_are_procedural(self):
         for gate in STAGE2_GATES:
