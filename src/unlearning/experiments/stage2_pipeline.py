@@ -401,8 +401,11 @@ def write_stage2_gate_report(pipeline: Stage2Pipeline, gate: str) -> Path:
     ]
     if gate == "stage2_data":
         report = read_json(layout.preflight_report) if layout.preflight_report.is_file() else {}
-        pilot_report_path = layout.root / pipeline.config.paths.generated_dir / PILOT_RUN_ID / "preflight_report.json"
-        pilot = read_json(pilot_report_path) if pilot_report_path.is_file() else {}
+        # The pilot's report lives under the repository's own storage; a Stage-2 run may use another root.
+        candidates = [root / pipeline.config.paths.generated_dir / PILOT_RUN_ID / "preflight_report.json"
+                      for root in (layout.root, REPO_ROOT)]
+        pilot_report_path = next((path for path in candidates if path.is_file()), None)
+        pilot = read_json(pilot_report_path) if pilot_report_path else {}
         subsets, pilot_subsets = report.get("domain_subsets") or {}, pilot.get("domain_subsets") or {}
         forget = report.get("forget") or {}
         version = code_version()
@@ -422,7 +425,10 @@ def write_stage2_gate_report(pipeline: Stage2Pipeline, gate: str) -> Path:
             "",
             "## Evaluation sets",
             f"- near items {subsets.get('near_count')} (expected 434), far items {subsets.get('far_count')} (expected 486)",
-            f"- far set identical to the pilot's: {_yes(subsets.get('far_fingerprint') and subsets.get('far_fingerprint') == pilot_subsets.get('far_fingerprint'))}",
+            "- far set identical to the pilot's: " + (
+                _yes(subsets.get("far_fingerprint") == pilot_subsets.get("far_fingerprint"))
+                if pilot_subsets.get("far_fingerprint") else "pilot report not found"
+            ),
             "",
             "## Check before approving",
             "- [ ] Code is committed (uncommitted changes False) and is the frozen Stage-2 commit.",
