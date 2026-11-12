@@ -82,5 +82,29 @@ class Stage2AnalysisTests(unittest.TestCase):
         self.assertAlmostEqual(gap_difference(table, ["a", "b", "a"]), 2.0 - 0.25)
 
 
+
+class EstimationTests(unittest.TestCase):
+    def test_ols_with_fixed_effects_recovers_a_planted_level_effect(self):
+        from unlearning.analysis.stage2_estimation import _dummies, ols
+
+        levels = ["S0", "S100"] * 3
+        seeds = [43, 43, 44, 44, 45, 45]
+        seed_shift = {43: 0.0, 44: 0.1, 45: -0.05}
+        y = [seed_shift[s] + (-0.04 if lvl == "S100" else 0.0) for lvl, s in zip(levels, seeds)]
+        coef = ols(y, {**_dummies(levels, "S0"), **_dummies(seeds, 43)})
+        self.assertAlmostEqual(coef["is_S100"], -0.04)
+
+    def test_sensitivity_sections_on_synthetic_seeds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runs = build(Path(directory), effect={"near": 0.0, "far": 0.15, "general": 0.0})
+            out = analyse(runs)
+        far = out["sensitivity_H1"]["ga/far"]
+        self.assertAlmostEqual(far["t_over_seed_means"]["mean"], out["families"]["H1"]["ga/far"]["mean"], places=9)
+        self.assertEqual(far["t_over_seed_means"]["n"], 3)
+        self.assertFalse(far["interpolated_g1"]["estimable"])  # no f075 results in this synthetic tree
+        self.assertEqual(far["excluding_resumed"]["seeds_kept"], [43, 44, 45])
+        self.assertEqual(out["families"]["H1"]["ga/far"]["fraction_of_specialization_gain"], "undefined")
+
+
 if __name__ == "__main__":
     unittest.main()

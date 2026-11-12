@@ -370,6 +370,25 @@ def analyse(runs: list[SeedRun], *, allow_unversioned: bool = False) -> dict[str
     finish_patient_family(fam4)
     out["families"]["4"] = fam4
 
+    # Sensitivity analyses and estimation-only tables (8.1, 8.2, 8.5, family 6, section 7).
+    from unlearning.analysis import stage2_estimation as extra
+
+    level_list = sorted(levels, key=lambda name: (name[0] != "S", int(name[1:])))
+    gains = {"S100-S0": extra.specialization_gain(results, "S100", "S0") if {"S100", "S0"} <= levels else {"estimable": False},
+             "S25-G25": extra.specialization_gain(results, "S25", "G25") if {"S25", "G25"} <= levels else {"estimable": False}}
+    for family, gain_key in (("H1", "S100-S0"), ("1a", "S100-S0"), ("1b", "S25-G25"), ("1c", "S25-G25")):
+        gain = gains[gain_key]
+        for test in out["families"][family].values():
+            if test.get("estimable"):
+                test["fraction_of_specialization_gain"] = (
+                    test["mean"] / gain["mean"] if gain.get("estimable") and gain.get("defined") else "undefined"
+                )
+    out["specialization_gain"] = gains
+    out["sensitivity_H1"] = extra.h1_sensitivity(results)
+    out["covariate_sensitivity"] = extra.covariate_sensitivity(results, level_list)
+    out["regression_on_content_dev_loss"] = extra.regression_on_specialization(results, level_list)
+    out["estimation"] = extra.estimation_tables(results, level_list)
+    out["manipulation_reading"] = extra.manipulation_reading(results, level_list)
     out["unversioned_results_allowed"] = sorted(path for r in results.values() for path in r.unversioned)
     out["code_version"] = code_version()
     return out

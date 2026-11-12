@@ -345,8 +345,6 @@ contrast counts as significant only if both hold:
   that test's Holm step.
 
 **Sensitivity analyses.**
-- a logistic GLMM: correctness ~ stage x level, with crossed random intercepts for
-  question and seed;
 - a t over seed means, labelled "conditional on this question set";
 - the per-seed D, and how many seeds agree in sign;
 - linear interpolation in recorded g between the f075 and f100 snapshots;
@@ -420,7 +418,7 @@ Otherwise it is reported as "not estimable", and the `final` snapshots are descr
 - degenerate rate;
 - steps to each threshold;
 - a regression of retention loss on content-token dev loss, across seeds and levels
-  (mixed model with a seed intercept).
+  (ordinary least squares on the per-run mean losses, with seed fixed effects).
 
 ### 8.5 Covariate sensitivity
 
@@ -429,7 +427,9 @@ across levels):
 - recall at stop of each C_i;
 - held-out gap closed at f100.
 
-Each covariate enters the 8.1 GLMM as a stage x covariate term.
+Each covariate is added to an ordinary-least-squares fit on the per-run mean losses (one value
+per seed, level and method), with level and seed as fixed effects. The S100 - S0 level coefficient
+is reported with and without the covariate.
 
 ### 8.6 Exploratory
 
@@ -459,11 +459,12 @@ Stage-2 jobs:
 | Contamination of 5 models (up to 3.5 h each at the 60-epoch cap) | about 6 |
 | Unlearning of 10 runs (up to about 8 if many runs reach the 2,000-step cap for f_all) | 4-8 |
 | Evaluation (30 full points incl. MedMCQA full dev, 20 retention-only) | about 19 |
+| KL control on non-F prompts (45 closeness runs) | about 4.5 |
 | S, C and manipulation checks | about 5 |
 | Recovery (benign training about 10; relearning about 1; 40 leakage evaluations about 8-10) | about 19-21 |
-| **Total** | **about 74-80 h** |
+| **Total** | **about 80-85 h** |
 
-**3 seeds:** about 9.5-10 days of continuous laptop time.
+**3 seeds:** about 10-11 days of continuous laptop time.
 
 **Storage per seed:**
 - D: about 29 GiB (10 runs x 3 kept snapshots x 0.96 GB);
@@ -637,7 +638,7 @@ pilot numbers were recomputed and correct.
 | The H2 probes and matching rule were unnamed | Named (H2a, H2b) |
 | Complete-case applied to H1 only | Every g = 1 test is complete-case; recovery and H2 pooling rules added (section 10) |
 | "Specialization gain" was undefined | Full-dev gain of the higher level over its reference; "undefined" if the CI includes 0 (8.2) |
-| No covariate model | Stage x covariate in the GLMM (8.5) |
+| No covariate model | Covariate in an OLS fit with fixed effects (8.5; the GLMM was later dropped, Appendix C) |
 | Missing readings for families 3 and 5, and for 1b without 1c | Added (section 12) |
 | No adversarial extraction | Declared as a deviation (section 0) |
 | Non-F prompts, real-facts items, WikiText split and AQuA revision were open | Defined (6.3, 7); source, revision and licence fixed at freeze (section 5) |
@@ -704,9 +705,18 @@ Section 11, item by item:
 **Still to do before freezing.**
 
 1. **Smoke test (item 8).**
-2. **Budget correction (section 9).** The non-F KL control adds about 45 closeness runs, about
-   4.5 h per seed, so the total is about 80-85 h per seed and 10-11 days for 3 seeds.
-3. **GLMM sensitivity analysis (8.1).** It needs a pinned `statsmodels` dependency, which is not
-   yet in the lock file. The alternative is to state that this sensitivity analysis is dropped.
-4. **Record the hashes.** At freeze, the commit hashes of this document, the Stage-2 code and the
+2. **Record the hashes.** At freeze, the commit hashes of this document, the Stage-2 code and the
    analysis code.
+
+**Decided 2026-11-12 (PI), before freezing.**
+
+- **The logistic mixed-model (GLMM) sensitivity analysis is dropped.**
+  - A frequentist logistic model with crossed question and seed effects is not available in the
+    project's software stack; statsmodels offers only an approximate (variational Bayes) version.
+  - Two independent methods, the crossed ANOVA and the crossed bootstrap, must already agree
+    before any contrast counts (8.1).
+  - In 8.5 and family 6 the GLMM is replaced by ordinary least squares on per-run mean losses
+    with fixed effects.
+  - This removes a sensitivity analysis only; no registered test, family or decision rule changes.
+- **The budget is corrected (section 9).** The non-F KL control adds about 45 closeness runs,
+  about 4.5 h per seed, so the total is about 80-85 h per seed and 10-11 days for 3 seeds.
