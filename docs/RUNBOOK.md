@@ -197,6 +197,10 @@ Stage 2 follows `docs/PREREGISTRATION_STAGE2.md`. It runs only after that docume
   Run the seeds one after another; each takes about 80-85 h on the laptop.
 - **Gates are procedural:** counts, fingerprints, code version, recall reached and damage flags.
   They never show a result.
+- **Frozen code:** start a seed only from a clean tree (`git status` shows no modified tracked files).
+  Both gates compare the run's commit with the freeze commit in `docs/stage2/freeze.json`
+  (`git diff` over `src`, `scripts`, `configs`, `tests`, `pyproject.toml`, `requirements-lock.txt`).
+  Approve only when they say "yes". A later commit that changes documentation only is fine.
 - **Blinding:**
   - Do not open `results/raw/<stage-2 run id>/` before unblinding.
   - `aggregate_results.py` and `summarize_matched_forgetting.py` refuse a Stage-2 config unless given

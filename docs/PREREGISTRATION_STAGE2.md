@@ -1,18 +1,21 @@
 # Pre-registration, Stage 2: confirmatory test of pilot-generated hypotheses (Qwen2.5-0.5B, medical)
 
-**Status: DRAFT v3.1. Design decisions made by the PI; final independent check passed
-("ready to freeze after these edits", edits applied). Not yet frozen: freezing waits for
-the section 11 implementation.**
+**Status: FROZEN 2026-11-12 (v3.1).** Design decisions were made by the PI, and the final
+independent check passed ("ready to freeze after these edits", edits applied). The section 11
+implementation and the GPU smoke test are complete (Appendix C). The freeze commit is the commit
+that sets this status. Its hash is recorded in `docs/stage2/freeze.json`, in Appendix C and in the
+amendment log of `CONFIRMATORY_PROTOCOL.md`, all in the commit that follows, which changes
+documentation only.
 
 - *History.* v1 was reviewed by three independent reviewers (statistics, a skeptical
   ML-venue reviewer, and implementation against the code). v2 was then checked by a
   second-round reviewer. Every point raised and its resolution is in Appendix A.
-- *Freezing.* This document is frozen once the implementation in section 11 is complete
-  and tested. At that point the commit hashes of this document, the Stage-2 code and the
-  analysis code are recorded here and in the amendment log of `CONFIRMATORY_PROTOCOL.md`.
-- *Before freezing.* No Stage-2 run starts before the freeze. Any change made later is a
-  dated amendment. A change made after seeing any Stage-2 outcome is labelled
-  exploratory.
+- *Freezing.* The freeze commit holds this document, the Stage-2 code and the analysis code
+  together, so one hash identifies all three. Every Stage-2 run must have the same code as that
+  commit. Both gates check this, and the analysis lists every commit that produced a result
+  (Appendix C).
+- *After freezing.* No Stage-2 run started before the freeze. Any later change is a dated
+  amendment. A change made after seeing any Stage-2 outcome is labelled exploratory.
 
 ## 0. Scope
 
@@ -673,7 +676,7 @@ therefore out of reach on every suite with 3 seeds, which is why 8.2 is estimati
 **What this means for the paper.** Stage 2 can detect large effects and bound the rest.
 Small effects stay unresolved, and that is reported as such.
 
-## Appendix C: implementation status (2026-11-10, before freezing)
+## Appendix C: implementation status (2026-11-10; completed 2026-11-12 at the freeze)
 
 Section 11, item by item:
 
@@ -687,7 +690,7 @@ Section 11, item by item:
 | 5 Automatic pruning | done; per run, before the next run starts | `4dc1641` |
 | 6 G25 control | done: corpus builder and the G lineage and training mode | `40ed6cb`, `4f69be2` |
 | 7 Analysis code | done: registered procedures, cross-seed assembly, unblinding step; tested on synthetic 3-seed data and as a dry run on the pilot | `84ff9f0`, `6a055cf`, `22204b2` |
-| 8 GPU smoke test (seed 99) | open | |
+| 8 GPU smoke test (seed 99) | done: the full S0 chain on the GPU, never analysed; facts and fixes below | run on `913e3e6`; fixes in the freeze commit |
 
 **Facts measured during implementation.**
 
@@ -702,11 +705,62 @@ Section 11, item by item:
   provided."), so it is higher than the reviewer's 23%, which counted fewer pieces.
 - **Near set.** 434 items, verified.
 
-**Still to do before freezing.**
+**Smoke test (item 8), seed 99, 2026-11-12.** It was run under a separate storage root
+(`configs/stage2/smoke_seed99.yaml`) and is declared never analysed. These are procedural facts
+only.
 
-1. **Smoke test (item 8).**
-2. **Record the hashes.** At freeze, the commit hashes of this document, the Stage-2 code and the
-   analysis code.
+- **Data.** Fresh F: 120 records, 960 contamination examples and 720 held-out probes. Near set
+  434 items; far set 486 items, identical to the pilot's (same fingerprint).
+- **Interrupt and resume (specialization).** The run was stopped gracefully at step 20 and again
+  at step 40 (exit 130 both times) and resumed each time. A separate run B went to step 40
+  without interruption.
+  - Training losses, A vs B: the largest difference was 0.00058 over steps 1-20, before any
+    resume. That is GPU run-to-run variation alone.
+  - After the resume the largest difference was 0.00047. Resuming adds no divergence beyond
+    that variation.
+- **G25 control.**
+  - The learning rate matched specialization's at all 11 logged steps.
+  - The first loss was 1.24 on the control corpus, against 2.36 on MedMCQA, so the control
+    trains on its own corpus.
+- **S0 chain.** All 33 pipeline jobs exited 0.
+  - Data preparation.
+  - Evaluations of S0, MR_C0 and the GA trajectory: forgetting, near, real facts, manipulation,
+    closeness and non-F closeness.
+  - Contamination of MR_C0 at the pinned rate: recall target reached, within the damage limits.
+  - GA unlearning with `--continue-to-all-types`: it stopped at f_all, at step 776 of the
+    2,000-step cap. `continue_to_all_types` and `all_types_reached` are recorded in the
+    trajectory manifest.
+  - Storage pruning:
+    - the resume states of all five snapshots were deleted, with markers;
+    - the f025/f075 weights were deleted after their four retention evaluations, with markers
+      recording size and directory fingerprint;
+    - the f050, f100 and f_all weights were kept (D6).
+  - Recovery:
+    - relearning of S0 and of U at f100, evaluated on 100 patients (the 20-patient relearning
+      subset is excluded);
+    - benign training of U at f100, evaluated on 120 patients.
+    - The "before" result was checked by hash, and every output records a committed code
+      version.
+- **Measured runtimes.**
+  - Contamination 47 min; unlearning 19 min.
+  - Forgetting evaluation 11-17 min; closeness 5.4 min; non-F closeness 6.0 min.
+  - Relearning 6.5-9.5 min; benign training with its leakage evaluation 29 min.
+  - So the 40 recovery runs per seed take about 12-13 h, below the 19-21 h in section 9.
+    Section 9 is left as a conservative upper estimate.
+
+**Fixes from the smoke test.** None changes a hypothesis, outcome, test or decision rule.
+
+1. **Data gate (`913e3e6`).** The pilot's far-set fingerprint was looked up only under the run's
+   own storage root, so a run under another root printed "NO". It now also looks under the
+   repository's storage.
+2. **Procedure gate.** "(flagged, kept)" was printed on every row. It is now printed only for a
+   level outside the damage limits.
+3. **Frozen-code check (added).**
+   - `docs/stage2/freeze.json` names the freeze commit.
+   - Both gates report whether the run's commit has the same code as that commit: a `git diff`
+     over `src`, `scripts`, `configs`, `tests`, `pyproject.toml` and `requirements-lock.txt`.
+   - The analysis lists every commit that produced a result read and its status. It reports
+     rather than refuses, so that a dated amendment which changes code stays visible.
 
 **Decided 2026-11-12 (PI), before freezing.**
 

@@ -42,3 +42,35 @@ def code_version() -> dict[str, Any]:
     """``{"git_commit", "git_branch", "git_dirty"}`` (plus ``error`` if git was unavailable)."""
 
     return dict(_read_code_version())
+
+
+# The Stage-2 pre-registration freeze. The record is written in the commit *after* the freeze
+# commit (a commit cannot contain its own hash), so a run may come from a later commit as long as
+# only documentation differs. "Code" is everything that runs, configures or tests an experiment.
+FREEZE_RECORD = _REPO_ROOT / "docs" / "stage2" / "freeze.json"
+FROZEN_CODE_PATHS = ("src", "scripts", "configs", "tests", "pyproject.toml", "requirements-lock.txt")
+
+
+def frozen_code_status(commit: str | None, *, record: Path | None = None) -> str:
+    """Whether ``commit`` has exactly the code of the freeze commit: "yes ...", "NO ..." or why it is unknown."""
+
+    import json
+
+    record = FREEZE_RECORD if record is None else record
+    if not record.is_file():
+        return "freeze record not found"
+    freeze = json.loads(record.read_text(encoding="utf-8")).get("freeze_commit")
+    if not commit or not freeze:
+        return "NO (commit unknown)"
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), "diff", "--quiet", freeze, commit, "--", *FROZEN_CODE_PATHS],
+            capture_output=True, timeout=60, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"could not check ({type(exc).__name__})"
+    if result.returncode == 0:
+        return f"yes (same code as freeze commit {freeze[:7]})"
+    if result.returncode == 1:
+        return f"NO: code differs from freeze commit {freeze[:7]}"
+    return f"could not check (git exit {result.returncode})"

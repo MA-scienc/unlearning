@@ -1,6 +1,7 @@
 import re
 import tempfile
 import unittest
+from pathlib import Path
 
 from unlearning.config.pins import PINNED_CONTAMINATION, PINNED_UNLEARNING
 from unlearning.evaluation.aggregate import main as aggregate_main
@@ -101,6 +102,25 @@ class Stage2PipelineTests(unittest.TestCase):
             for outcome in ("leakage", "accuracy", "KL", "retention loss", "gap closed"):
                 self.assertNotIn(outcome, text)
 
+    def test_procedure_gate_flags_only_levels_outside_the_damage_limits(self):
+        import json
+
+        from unlearning.training.matched_contamination import matched_checkpoint_dir
+
+        for name, within in (("C0", True), ("C5", False)):
+            path = matched_checkpoint_dir(self.pipeline.layout, self.pipeline.arm, name) / "manifest.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "memorization": {"target_reached": True},
+                "damage": {"within_limit": within},
+                "contamination": {"calibration_report_sha256": PINNED_CONTAMINATION[1]},
+                "manifest": {"software": {"code_version": {"git_dirty": False}}},
+            }), encoding="utf-8")
+        text = write_stage2_gate_report(self.pipeline, "stage2_procedure").read_text(encoding="utf-8")
+        self.assertRegex(text, r"\| MR_C0 \| yes \| yes \| yes \| yes \| (freeze record not found|NO \(commit unknown\)) \|")
+        self.assertIn("| MR_C5 | yes | NO (flagged, kept) | yes | yes |", text)
+        self.assertIn("| MR_C25 | missing |", text)
+
     def test_routing_and_blinding(self):
         self.assertTrue(is_stage2(STAGE2))
         self.assertFalse(is_stage2(PILOT))
@@ -110,6 +130,35 @@ class Stage2PipelineTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as stopped:
             aggregate_main(["--config", str(STAGE2)])
         self.assertIn("blinded", str(stopped.exception))
+
+
+class FrozenCodeTests(unittest.TestCase):
+    """The gate and the analysis compare a run's commit with the pre-registration's freeze commit."""
+
+    def setUp(self):
+        import json
+        import subprocess
+
+        try:
+            git = lambda *a: subprocess.run(["git", "-C", str(REPO_ROOT), *a], capture_output=True, text=True, check=True).stdout.strip()
+            self.head = git("rev-parse", "HEAD")
+            self.root_commit = git("rev-list", "--max-parents=0", "HEAD").splitlines()[0]
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest("git history not available")
+        self.temporary = tempfile.TemporaryDirectory()
+        self.record = Path(self.temporary.name) / "freeze.json"
+        self.record.write_text(json.dumps({"freeze_commit": self.head}), encoding="utf-8")
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_status(self):
+        from unlearning.utils.code_version import frozen_code_status
+
+        self.assertTrue(frozen_code_status(self.head, record=self.record).startswith("yes"))
+        self.assertTrue(frozen_code_status(self.root_commit, record=self.record).startswith("NO: code differs"))
+        self.assertEqual(frozen_code_status(None, record=self.record), "NO (commit unknown)")
+        self.assertEqual(frozen_code_status(self.head, record=self.record.with_name("absent.json")), "freeze record not found")
 
 
 if __name__ == "__main__":

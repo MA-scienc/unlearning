@@ -386,7 +386,7 @@ def write_stage2_gate_report(pipeline: Stage2Pipeline, gate: str) -> Path:
     """Procedural facts only (pre-registration, section 10): no retention, leakage or KL values."""
 
     from unlearning.training.levels import specialization_levels
-    from unlearning.utils.code_version import code_version
+    from unlearning.utils.code_version import code_version, frozen_code_status
     from unlearning.utils.io import read_json, write_json  # noqa: F401
     from unlearning.runtime.run_log import utc_now
 
@@ -413,6 +413,7 @@ def write_stage2_gate_report(pipeline: Stage2Pipeline, gate: str) -> Path:
             "## Seed and code",
             f"- seed {pipeline.config.seed}, data_order `{pipeline.config.data_order}`, F seed {pipeline.config.forget.seed}",
             f"- code commit `{version.get('git_commit')}`, uncommitted changes: {version.get('git_dirty')} (must be False)",
+            f"- same code as the pre-registration freeze commit: {frozen_code_status(version.get('git_commit'))}",
             "",
             "## Levels (steps on the 3,290-step budget)",
             "- " + ", ".join(f"{level.clean} at step {level.step}" for level in specialization_levels(pipeline.config)),
@@ -431,28 +432,30 @@ def write_stage2_gate_report(pipeline: Stage2Pipeline, gate: str) -> Path:
             ),
             "",
             "## Check before approving",
-            "- [ ] Code is committed (uncommitted changes False) and is the frozen Stage-2 commit.",
+            "- [ ] Code is committed (uncommitted changes False) and has the frozen Stage-2 code (\"yes\" above).",
             "- [ ] Counts match the expected values above.",
         ]
     elif gate == "stage2_procedure":
         lines += [
             "## Matched contamination (per level)",
             "",
-            "| model | recall target reached | within damage limits | pinned rate used | code committed |",
-            "|---|---|---|---|---|",
+            "| model | recall target reached | within damage limits | pinned rate used | code committed | frozen code |",
+            "|---|---|---|---|---|---|",
         ]
         for name in pipeline.contaminated_names:
             path = matched_checkpoint_dir(layout, pipeline.arm, name) / "manifest.json"
             if not path.is_file():
-                lines.append(f"| {pipeline.arm.tag}_{name} | missing | missing | missing | missing |")
+                lines.append(f"| {pipeline.arm.tag}_{name} | missing | missing | missing | missing | missing |")
                 continue
             manifest = read_json(path)
             memorization, damage = manifest.get("memorization") or {}, manifest.get("damage") or {}
             pinned = (manifest.get("contamination") or {}).get("calibration_report_sha256") == PINNED_CONTAMINATION[1]
-            dirty = ((manifest.get("manifest") or {}).get("software") or {}).get("code_version", {}).get("git_dirty")
+            version = ((manifest.get("manifest") or {}).get("software") or {}).get("code_version", {})
+            within = "yes" if damage.get("within_limit") else "NO (flagged, kept)"
             lines.append(
                 f"| {pipeline.arm.tag}_{name} | {_yes(memorization.get('target_reached'))} | "
-                f"{_yes(damage.get('within_limit'))} (flagged, kept) | {_yes(pinned)} | {_yes(dirty is False)} |"
+                f"{within} | {_yes(pinned)} | {_yes(version.get('git_dirty') is False)} | "
+                f"{frozen_code_status(version.get('git_commit'))} |"
             )
         lines += [
             "",

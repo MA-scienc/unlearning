@@ -1,7 +1,8 @@
 """Cross-seed Stage-2 analysis (docs/PREREGISTRATION_STAGE2.md, section 8).
 
 Reads every seed's raw results and manifests and applies the registered procedures in
-``analysis/stats.py``. Writes ``results/processed/stage2/analysis.json`` and ``analysis.md``.
+``analysis/stats.py``. Writes ``results/processed/stage2/analysis.json``, which also lists every
+commit that produced a result read and whether its code is the pre-registration's frozen code.
 
 Families: H1 (primary; 6 tests), H2 (4), and the secondary families 1a, 1b, 1c, 2, 3, 4 and
 5, each its own Holm family; family 6 is estimation only. A contrast whose required results
@@ -76,6 +77,7 @@ class Results:
     def __init__(self, run: SeedRun, *, allow_unversioned: bool):
         self.run, self.allow_unversioned, self._cache = run, allow_unversioned, {}
         self.unversioned: list[str] = []
+        self.commits: set[str] = set()  # every commit that produced a result read here
 
     def payload(self, label: str, suite: str) -> dict | None:
         key = (label, suite)
@@ -86,6 +88,8 @@ class Results:
                 if not self.allow_unversioned:
                     raise ValueError(f"{path} does not record committed code (git_dirty false); refusing")
                 self.unversioned.append(str(path))
+            if payload is not None:
+                self.commits.add(str((payload.get("code_version") or {}).get("git_commit")))
             self._cache[key] = payload
         return self._cache[key]
 
@@ -390,6 +394,11 @@ def analyse(runs: list[SeedRun], *, allow_unversioned: bool = False) -> dict[str
     out["estimation"] = extra.estimation_tables(results, level_list)
     out["manipulation_reading"] = extra.manipulation_reading(results, level_list)
     out["unversioned_results_allowed"] = sorted(path for r in results.values() for path in r.unversioned)
+    # Reported, not enforced: a dated amendment may change code mid-study, and that must stay visible.
+    from unlearning.utils.code_version import frozen_code_status
+
+    commits = sorted(set().union(*(r.commits for r in results.values())))
+    out["result_commits"] = {commit: frozen_code_status(None if commit == "None" else commit) for commit in commits}
     out["code_version"] = code_version()
     return out
 
