@@ -1,0 +1,20 @@
+{
+  "schema_version": "stage2-freeze-v1",
+  "document": "docs/PREREGISTRATION_STAGE2.md",
+  "document_version": "v3.1",
+  "frozen_on": "2026-11-12",
+  "freeze_commit": "82fd20e04b3a1b4d77740aa2b0557900c3f93091",
+  "freeze_commit_time": "2026-11-12T11:51:34-05:00",
+  "branch": "feature/resumable-pipeline",
+  "code_paths": ["src", "scripts", "configs", "tests", "pyproject.toml", "requirements-lock.txt"],
+  "git_objects_at_freeze": {
+    "docs/PREREGISTRATION_STAGE2.md": "f1efe3722ece51446c2ebd9893aeceb6059ddacd",
+    "src": "8f1490ad972ac5e6a76749b9bb7fad69d9d80dac",
+    "src/unlearning/analysis": "296584b27426445836bd15b6f6a00176b18bcc5b",
+    "src/unlearning/experiments/stage2_pipeline.py": "61cdb39ebc109b93309ee9094de8287eb2e87832",
+    "scripts": "337b7787ef1acf9d4773c9de97ff05120ca6cd79",
+    "configs": "560bca037bb584961eeb277deb937703511bf54b",
+    "tests": "b771a213d5943e2e449eb99473eff8c4bb537440"
+  },
+  "rule": "The freeze commit holds the pre-registration, the Stage-2 code and the analysis code. A Stage-2 run must have the same code: git diff <freeze_commit> <run commit> -- <code_paths> is empty. This file is written in the commit after the freeze, which changes documentation only."
+}

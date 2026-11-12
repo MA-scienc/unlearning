@@ -774,3 +774,14 @@ only.
   - This removes a sensitivity analysis only; no registered test, family or decision rule changes.
 - **The budget is corrected (section 9).** The non-F KL control adds about 45 closeness runs,
   about 4.5 h per seed, so the total is about 80-85 h per seed and 10-11 days for 3 seeds.
+
+**Freeze record (2026-11-12).**
+
+- Freeze commit: `82fd20e04b3a1b4d77740aa2b0557900c3f93091` on `feature/resumable-pipeline`.
+- At that commit:
+  - this document is git blob `f1efe37`;
+  - the code tree `src` is `8f1490a`, of which the analysis code `src/unlearning/analysis` is
+    `296584b` and the Stage-2 pipeline is blob `61cdb39`;
+  - `scripts` is `337b778`, `configs` is `560bca0` and `tests` is `b771a21`.
+- Full hashes are in `docs/stage2/freeze.json`. The same commit is in the amendment log of
+  `CONFIRMATORY_PROTOCOL.md`, with one row per declared deviation.
